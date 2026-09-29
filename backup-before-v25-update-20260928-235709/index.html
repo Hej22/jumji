@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f7efe2">
+<title>점지 v0.3</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="app">
+<header><div><small>JUMJI · v0.3</small><h1>좋은 아침 ☀️</h1></div><button id="capture" class="round" aria-label="빠른 기록">＋</button></header>
+<section class="room"><div class="sun"></div><div class="plant">🌿</div><div id="mascot" class="mascot">🧸</div><div class="desk">✏️　📖　☕</div></section>
+<section id="today" class="screen"><div class="card"><div class="head"><div><small>TODAY'S JUMJI</small><div id="todayDate" class="todaydate"></div><h2 id="headline">오늘은 이 정도면 충분해.</h2></div><i></i></div><div id="todaySummary"></div><div id="capacity"></div><div id="events"></div><div id="plan"></div><div id="planToolbar" class="plan-toolbar"><button id="addPlannedTask" class="secondary">계획 추가</button><button id="swap" class="secondary">계획 변경</button></div><div id="eveningSuggestion"></div><div id="todayActions"><button id="accept" class="primary wide">이대로 할래</button><div id="pendingPlanActions"></div></div></div><button id="eveningButton" class="secondary wide evening-entry">오늘 하루 돌아보기</button></section>
+<section id="calendar" class="screen hidden"><div class="title"><h2>캘린더</h2><button id="addEvent">＋ 일정</button></div><div class="calendar-note">점지에서 만든 일정과 외부 캘린더 일정은 따로 관리해.</div><div id="eventList"></div></section>
+<section id="projects" class="screen hidden"><div class="title"><h2>내 프로젝트</h2><button id="addProject">＋ 프로젝트</button></div><div id="projectList"></div><section class="recurring-section"><div class="title"><h3>반복 작업</h3><button id="addRecurring">＋ 반복 작업</button></div><p class="muted recurring-intro">프로젝트와 별도로 관리할 수 있어. 필요하면 프로젝트 단계에 연결할 수도 있어.</p><div id="recurringList"></div></section></section>
+<section id="settings" class="screen hidden"><div class="title"><h2>설정</h2></div><div class="card settings-card"><h3>기본 작업 시간</h3><p class="muted">하루 계획을 계산할 시작 시간과 종료 시간을 설정해.</p><label class="label" for="workStartSetting">작업 시작</label><input class="input" id="workStartSetting" type="time" value="09:00"><label class="label" for="workEndSetting">작업 종료</label><input class="input" id="workEndSetting" type="time" value="17:00"><p id="settingsFeedback" class="settings-feedback" role="status" aria-live="polite"></p><button id="saveWorkHours" class="primary wide">작업 시간 저장</button></div></section>
+<section id="captureScreen" class="screen hidden"><div class="title"><h2>빠른 기록</h2></div><textarea id="captureText" placeholder="생각난 걸 그냥 적어봐.\n예: 뾰치 할로윈 배경화면도 만들어야겠다."></textarea><button id="saveCapture" class="primary wide">기억해둘게</button></section>
+<section id="records" class="screen hidden"><div class="title"><h2>기록</h2><button id="exportData">데이터 백업</button></div><div id="reviewCalendar"></div><div id="selectedDayReview"></div><hr><h3>빠른 메모</h3><div id="captureList"></div></section>
+<section id="evening" class="screen hidden"><div class="title"><h2>오늘 하루 돌아보기</h2><button id="backToToday">오늘</button></div><div id="eveningList"></div></section>
+<nav><button data-screen="today" class="active">🏠<span>오늘</span></button><button data-screen="calendar">📅<span>캘린더</span></button><button data-screen="projects">📦<span>프로젝트</span></button><button data-screen="records">📝<span>기록</span></button><button data-screen="settings">⚙️<span>설정</span></button></nav>
+<div id="toast" class="toast hidden"></div><div id="modal" class="modal hidden"><div class="sheet"><div class="sheethead"><h3 id="modalTitle"></h3><button id="close">×</button></div><div id="modalBody"></div></div></div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

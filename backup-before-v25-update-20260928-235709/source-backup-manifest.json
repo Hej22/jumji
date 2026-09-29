@@ -1,0 +1,27 @@
+﻿[
+    {
+        "file":  "app.js",
+        "sha256":  "E266C6866F79C16FCCA60CA901A9DFBFE6FD244E34EBC338253FA4F7571C9059",
+        "bytes":  96040
+    },
+    {
+        "file":  "index.html",
+        "sha256":  "E3E38B3203E623572CBAD13C9E30BC08732434EE2C5779043E179880D9F433C8",
+        "bytes":  4325
+    },
+    {
+        "file":  "style.css",
+        "sha256":  "0A17C727DB308132812C4CDFB95B7ED4E35395E77EB150CB815911BAC200D1FB",
+        "bytes":  13573
+    },
+    {
+        "file":  "sw.js",
+        "sha256":  "4046F72B6A539336BA3A46C5BA784358E58AFE241DE3FAA2773059E2DC6CE50F",
+        "bytes":  415
+    },
+    {
+        "file":  "manifest.json",
+        "sha256":  "5FF32757C23687B3A0306662C854034CDA32AF1DAD8E38BFB20B6D05AB397237",
+        "bytes":  145
+    }
+]
