@@ -1,8 +1,13 @@
 const KEY = 'jumji_v03';
+const IMPORT_BACKUP_KEY = `${KEY}_preimport_backup`;
 const DEFAULT_WORK_START = '09:00';
 const DEFAULT_WORK_END = '17:00';
+const DEFAULT_WORKDAYS = [1, 2, 3, 4, 5];
+const DEFAULT_LUNCH_ENABLED = true;
 const DEFAULT_LUNCH_MINUTES = 60;
+const DEFAULT_FIKA_ENABLED = true;
 const DEFAULT_FIKA_MINUTES = 60;
+const DEFAULT_SETTINGS_FIKA_MINUTES = 30;
 const DEFAULT_PLAN_UTILIZATION = 0.8;
 const DEFAULT_PREPARATION_MINUTES = 30;
 const EVENING_START = '20:00';
@@ -38,6 +43,8 @@ let proposalDraft = null;
 let proposalMeta = null;
 let planChangeDraft = null;
 let planChangeHadPreview = false;
+let pendingImportData = null;
+let pendingImportSummary = null;
 let toastTimer = null;
 let selectedReviewDate = todayKey();
 let editingReview = false;
@@ -51,9 +58,16 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, match => ({ '&': '&
 const dateLabel = value => value ? new Intl.DateTimeFormat('ko-KR', { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(`${value}T00:00:00Z`)) : '마감 없음';
 function clampProgress(value) { return Math.max(0, Math.min(100, Math.round((Number(value) || 0) * 100) / 100)); }
 
-function migrate() {
+function migrate(target = d, { persistLegacyDates = target === d && Boolean(loaded) } = {}) {
+  if (!Object.prototype.hasOwnProperty.call(target, 'workStart')) target.workStart = DEFAULT_WORK_START;
+  if (!Object.prototype.hasOwnProperty.call(target, 'workEnd')) target.workEnd = DEFAULT_WORK_END;
+  if (!Object.prototype.hasOwnProperty.call(target, 'workdays')) target.workdays = [...DEFAULT_WORKDAYS];
+  if (!Object.prototype.hasOwnProperty.call(target, 'lunchEnabled')) target.lunchEnabled = DEFAULT_LUNCH_ENABLED;
+  if (!Object.prototype.hasOwnProperty.call(target, 'lunchDuration')) target.lunchDuration = DEFAULT_LUNCH_MINUTES;
+  if (!Object.prototype.hasOwnProperty.call(target, 'fikaEnabled')) target.fikaEnabled = DEFAULT_FIKA_ENABLED;
+  if (!Object.prototype.hasOwnProperty.call(target, 'fikaDuration')) target.fikaDuration = DEFAULT_SETTINGS_FIKA_MINUTES;
   let assignedLegacyDates = false;
-  d.projects = (d.projects || []).map(project => {
+  target.projects = (target.projects || []).map(project => {
     const stages = Array.isArray(project.stages) ? project.stages : [{
       id: `${project.id}-legacy`, name: project.stage || '시작 전', progress: Number(project.progress) || 0,
       estimatedMinutes: 0, actualMinutes: 0
@@ -62,12 +76,12 @@ function migrate() {
     const progress = Number(project.progress) || 0;
     return { ...project, description: project.description || '', importance: Number(project.importance) || 3, deadline: project.deadline || null, status: project.status || '진행 중', stages: normalizedStages, progress, stage: project.stage || normalizedStages[0]?.name || '시작 전' };
   });
-  d.events = (d.events || []).map(event => ({ ...event, preparationMinutes: [0, 30, 60].includes(Number(event.preparationMinutes)) ? Number(event.preparationMinutes) : DEFAULT_PREPARATION_MINUTES }));
-  d.plan = (d.plan || []).map(item => {
+  target.events = (target.events || []).map(event => ({ ...event, preparationMinutes: [0, 30, 60].includes(Number(event.preparationMinutes)) ? Number(event.preparationMinutes) : DEFAULT_PREPARATION_MINUTES }));
+  target.plan = (target.plan || []).map(item => {
     const hadDailyProgress = item.dailyProgress !== undefined && item.dailyProgress !== null && Number.isFinite(Number(item.dailyProgress));
     const dailyProgress = item.done ? 100 : Math.max(0, Math.min(100, Math.round(Number(item.dailyProgress) || 0)));
     const date = item.date || todayKey();
-    const stage = d.projects.find(project => project.id == item.projectId)?.stages.find(candidate => candidate.id == item.stageId);
+    const stage = target.projects.find(project => project.id == item.projectId)?.stages.find(candidate => candidate.id == item.stageId);
     const estimate = Number(stage?.estimatedMinutes) || 0;
     const stageProgressApplied = Number.isFinite(Number(item.stageProgressApplied))
       ? clampProgress(item.stageProgressApplied)
@@ -75,18 +89,18 @@ function migrate() {
     if (!item.date) assignedLegacyDates = true;
     return { ...item, estimatedMinutes: Number(item.estimatedMinutes ?? item.minutes) || 0, actualMinutes: Number(item.actualMinutes) || 0, minutes: Number(item.minutes ?? item.estimatedMinutes) || 0, dailyProgress, stageProgressApplied, progressMode: item.progressMode || 'auto', done: Boolean(item.done || dailyProgress === 100), date };
   });
-  d.plan.forEach(syncPlanActualToProject);
-  d.captures = (d.captures || []).map((capture, index) => ({ ...capture, id: capture.id || `capture-${index}`, text: capture.text ?? capture.content ?? '', at: capture.at || capture.createdAt || new Date().toISOString() }));
-  d.planAccepted = Boolean(d.planAccepted); d.deferReasons = d.deferReasons || {}; d.dailyReviews = d.dailyReviews || {}; d.recurringTasks = Array.isArray(d.recurringTasks) ? d.recurringTasks : [];
-  d.projects.forEach(syncProjectProgress);
-  if (assignedLegacyDates && loaded) {
+  target.plan.forEach(item => syncPlanActualToProject(item, target.projects));
+  target.captures = (target.captures || []).map((capture, index) => ({ ...capture, id: capture.id || `capture-${index}`, text: capture.text ?? capture.content ?? '', at: capture.at || capture.createdAt || new Date().toISOString() }));
+  target.planAccepted = Boolean(target.planAccepted); target.deferReasons = target.deferReasons || {}; target.dailyReviews = target.dailyReviews || {}; target.recurringTasks = Array.isArray(target.recurringTasks) ? target.recurringTasks : [];
+  target.projects.forEach(syncProjectProgress);
+  if (persistLegacyDates && assignedLegacyDates && target === d && loaded) {
     const raw = localStorage.getItem(KEY);
     if (raw !== null) {
       const original = JSON.parse(raw);
       if (original && typeof original === 'object' && !Array.isArray(original) && Array.isArray(original.plan)) {
         let changed = false;
         const plan = original.plan.map((item, index) => {
-          if (!item.date && d.plan[index]) { changed = true; return { ...item, date: d.plan[index].date }; }
+          if (!item.date && target.plan[index]) { changed = true; return { ...item, date: target.plan[index].date }; }
           return item;
         });
         if (changed) {
@@ -96,21 +110,185 @@ function migrate() {
       }
     }
   }
+  return target;
 }
 function save() { localStorage.setItem(KEY, JSON.stringify(d)); }
-function persistWorkHours(start, end) {
+function persistSettings({ start, end, workdays, lunchEnabled, lunchDuration, fikaEnabled, fikaDuration }) {
   const rawData = localStorage.getItem(KEY);
   const storedData = rawData === null ? { ...d } : JSON.parse(rawData);
   if (!storedData || typeof storedData !== 'object' || Array.isArray(storedData)) throw new Error('저장된 점지 데이터 형식이 올바르지 않습니다.');
   storedData.workStart = start;
   storedData.workEnd = end;
+  storedData.workdays = workdays;
+  storedData.lunchEnabled = lunchEnabled;
+  storedData.lunchDuration = lunchDuration;
+  storedData.fikaEnabled = fikaEnabled;
+  storedData.fikaDuration = fikaDuration;
   localStorage.setItem(KEY, JSON.stringify(storedData));
   d.workStart = start;
   d.workEnd = end;
+  d.workdays = workdays;
+  d.lunchEnabled = lunchEnabled;
+  d.lunchDuration = lunchDuration;
+  d.fikaEnabled = fikaEnabled;
+  d.fikaDuration = fikaDuration;
 }
 function renderSettings() {
   $('workStartSetting').value = workStartTime();
   $('workEndSetting').value = workEndTime();
+  document.querySelectorAll('[data-workday]').forEach(button => button.classList.toggle('selected', Array.isArray(d.workdays) && d.workdays.includes(Number(button.dataset.workday))));
+  $('lunchEnabled').checked = Boolean(d.lunchEnabled);
+  $('lunchDuration').value = String(Number(d.lunchDuration) || DEFAULT_LUNCH_MINUTES);
+  $('fikaEnabled').checked = Boolean(d.fikaEnabled);
+  $('fikaDuration').value = String(Number(d.fikaDuration) || DEFAULT_SETTINGS_FIKA_MINUTES);
+  updateSettingsDurationState();
+}
+function updateSettingsDurationState() {
+  $('lunchDuration').disabled = !$('lunchEnabled').checked;
+  $('fikaDuration').disabled = !$('fikaEnabled').checked;
+}
+function importBackupEnvelope() {
+  const raw = localStorage.getItem(IMPORT_BACKUP_KEY);
+  if (!raw) return null;
+  const envelope = JSON.parse(raw);
+  if (envelope?.version !== 1 || typeof envelope.data !== 'string') throw new Error('가져오기 백업 형식이 올바르지 않습니다.');
+  const parsed = JSON.parse(envelope.data);
+  const validation = globalThis.JumjiImportData?.validateImportedData(parsed);
+  if (!validation?.valid) throw new Error('가져오기 백업을 복구할 수 없습니다.');
+  return { envelope, parsed };
+}
+function updateImportBackupActions() {
+  let available = false;
+  try { available = Boolean(localStorage.getItem(IMPORT_BACKUP_KEY)); } catch (error) { console.error('가져오기 백업에 접근하지 못했어.', error); }
+  $('downloadImportBackup')?.classList.toggle('hidden', !available);
+  $('restoreImportBackup')?.classList.toggle('hidden', !available);
+}
+function prepareImportCandidate(source) {
+  return globalThis.JumjiImportData.prepareImportedData(source, candidate => migrate(candidate, { persistLegacyDates: false }));
+}
+function backupDataForImport(previousValue) {
+  const backupData = previousValue === null ? JSON.stringify(d) : previousValue;
+  let parsed;
+  try { parsed = JSON.parse(backupData); } catch (cause) {
+    const error = new Error('현재 저장 데이터를 읽을 수 없어 백업하지 못했어.', { cause });
+    error.name = 'ImportBackupError';
+    throw error;
+  }
+  const validation = globalThis.JumjiImportData?.validateImportedData(parsed);
+  if (!validation?.valid) {
+    const error = new Error('현재 저장 데이터를 복구 가능한 백업으로 확인하지 못했어. 가져오기를 중단했어.');
+    error.name = 'ImportBackupError';
+    throw error;
+  }
+  return backupData;
+}
+function currentDataBackupSnapshot() {
+  try {
+    const previousValue = localStorage.getItem(KEY);
+    return { previousValue, backupData: backupDataForImport(previousValue) };
+  } catch (cause) {
+    if (cause.name === 'ImportBackupError') throw cause;
+    const error = new Error('현재 저장 데이터를 읽지 못해 백업할 수 없어. 가져오기를 중단했어.', { cause });
+    error.name = 'ImportBackupError';
+    throw error;
+  }
+}
+function downloadImportBackup() {
+  try {
+    const backup = importBackupEnvelope();
+    if (!backup) { toast('가져오기 전 백업이 없어.'); updateImportBackupActions(); return; }
+    const filename = `jumji_v03-preimport-backup-${todayKey()}.json`;
+    const url = URL.createObjectURL(new Blob([backup.envelope.data], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = filename; link.hidden = true;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('가져오기 전 백업 파일 다운로드를 시작했어.');
+  } catch (error) { console.error('가져오기 전 백업을 다운로드하지 못했어.', error); toast('백업에 접근하지 못했어. 복구 화면의 오류를 확인해줘.'); }
+}
+function restoreImportBackup() {
+  let backup, candidate;
+  try {
+    backup = importBackupEnvelope();
+    if (!backup) { toast('가져오기 전 백업이 없어.'); updateImportBackupActions(); return; }
+    candidate = prepareImportCandidate(backup.parsed);
+  } catch (error) { console.error('가져오기 전 백업을 준비하지 못했어.', error); toast('백업을 검증하거나 변환하지 못해 복구를 중단했어.'); return; }
+  if (!window.confirm('저장된 데이터를 가져오기 전 백업으로 바꿀까? 현재 데이터는 복구 키에 다시 보관돼.')) return;
+  try {
+    const { previousValue, backupData } = currentDataBackupSnapshot();
+    globalThis.JumjiImportData.commitImportedData({
+      storage: localStorage, key: KEY, backupKey: IMPORT_BACKUP_KEY,
+      previousValue, backupData,
+      importedData: candidate, savedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('가져오기 전 백업을 복구하지 못했어.', error);
+    toast(error.name === 'ImportBackupError' ? '복구 직전 데이터를 백업하지 못해 복구를 중단했어. 현재 데이터는 유지돼.' : '백업 복구 저장에 실패했어. 복구 키의 백업을 확인해줘.');
+    updateImportBackupActions();
+    return;
+  }
+  d = candidate;
+  render(); renderSettings(); updateImportBackupActions();
+  toast('백업을 복구했어. 복구 직전 데이터는 같은 복구 키에 보관돼.');
+}
+function confirmDataImport() {
+  if (!pendingImportData) return;
+  let importedData;
+  try {
+    importedData = prepareImportCandidate(pendingImportData);
+  } catch (error) {
+    console.error('가져온 데이터를 변환하지 못했어.', error);
+    toast('가져온 데이터를 검증하거나 변환하지 못했어. 기존 데이터는 유지돼.');
+    return;
+  }
+  try {
+    const { previousValue, backupData } = currentDataBackupSnapshot();
+    globalThis.JumjiImportData.commitImportedData({
+      storage: localStorage, key: KEY, backupKey: IMPORT_BACKUP_KEY,
+      previousValue, backupData,
+      importedData, savedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('가져오기 백업 또는 저장에 실패했어.', error);
+    updateImportBackupActions();
+    if (error.name === 'ImportBackupError') toast('복구용 백업을 확보하지 못해 가져오기를 중단했어. 기존 데이터는 유지돼.');
+    else toast(error.rollbackFailed ? '저장과 자동 복구가 모두 실패했어. 기록 화면의 복구 백업을 내려받아 확인해줘.' : '가져온 데이터를 저장하지 못했어. 기존 데이터는 유지돼. 복구 백업은 기록 화면에서 확인할 수 있어.');
+    return;
+  }
+  d = importedData;
+  pendingImportData = null; pendingImportSummary = null;
+  closeModal(); updateImportBackupActions();
+  render(); renderSettings();
+  toast('데이터를 가져왔어. 가져오기 전 데이터는 기록 화면의 복구 백업에 보관돼.');
+}
+function cancelDataImport() {
+  pendingImportData = null;
+  pendingImportSummary = null;
+  closeModal();
+  toast('데이터 가져오기를 취소했어. 기존 데이터는 유지돼.');
+}
+async function importDataFile(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const validation = globalThis.JumjiImportData?.validateImportedData(parsed);
+    if (!validation || !validation.valid) {
+      const errors = validation?.errors || ['JSON 형식이 올바르지 않습니다.'];
+      console.error('가져온 데이터 검증 실패', errors);
+      toast(errors[0]);
+      return;
+    }
+    const summary = globalThis.JumjiImportData.summarizeImportedData(parsed);
+    pendingImportData = parsed;
+    pendingImportSummary = summary;
+    modal('데이터 가져오기 확인', `<div class="muted">파일: ${esc(file.name)}</div><div><b>${summary.projects}개 프로젝트</b>, <b>${summary.events}개 일정</b>, <b>${summary.plan}개 계획</b>, <b>${summary.captures}개 기록</b>으로 가져올 예정이야.</div><div class="muted">확정하면 현재 데이터가 이 브라우저의 복구 백업(${esc(IMPORT_BACKUP_KEY)})에 저장돼. 기록 화면에서 내려받거나 복구할 수 있어. 다음 가져오기는 이 복구 백업을 새 백업으로 바꿔.</div><button class="primary wide" id="confirmDataImport">가져오기 확정</button><button class="secondary wide" id="cancelDataImport">취소</button>`);
+    $('confirmDataImport').onclick = confirmDataImport;
+    $('cancelDataImport').onclick = cancelDataImport;
+  } catch (error) {
+    console.error('데이터 파일을 읽지 못했어.', error);
+    toast('JSON 파일을 읽지 못했어. 파일 형식 또는 선택한 파일을 확인해줘.');
+  }
 }
 async function exportDataBackup() {
   let rawData;
@@ -239,8 +417,8 @@ function renderProjectList() {
   $('projectList').innerHTML = `<label class="project-sort-label" for="projectSort">정렬</label><select class="input project-sort" id="projectSort"><option value="manual" ${projectSortMode === 'manual' ? 'selected' : ''}>직접 정렬</option><option value="importance" ${projectSortMode === 'importance' ? 'selected' : ''}>중요도순</option><option value="deadline" ${projectSortMode === 'deadline' ? 'selected' : ''}>마감기한순</option></select>${sortedActive.map(entry => renderCard(entry, true)).join('') || '<div class="event">진행 중인 프로젝트가 없어.</div>'}<details class="completed-projects"><summary>완료된 프로젝트 (${completed.length})</summary>${completed.map(entry => renderCard(entry, false)).join('') || '<div class="event">완료된 프로젝트가 없어.</div>'}</details>`;
   renderRecurringTasks();
 }
-function syncPlanActualToProject(item) {
-  const project = [...d.projects, ...pendingProjects].find(candidate => candidate.id == item.projectId);
+function syncPlanActualToProject(item, projects = [...d.projects, ...pendingProjects]) {
+  const project = projects.find(candidate => candidate.id == item.projectId);
   if (!project) return;
   const stage = project.stages.find(candidate => candidate.id == item.stageId);
   if (!stage) return;
@@ -429,6 +607,44 @@ function workCapacity() {
   const base = Math.max(0, end - start - DEFAULT_LUNCH_MINUTES - DEFAULT_FIKA_MINUTES);
   return { base, blocked, available: Math.max(0, base - blocked), intervals };
 }
+function configuredWorkCapacityForPlan(planDate = todayKey()) {
+  const date = String(planDate || todayKey());
+  const workday = new Date(`${date}T00:00:00`).getDay();
+  const workdays = Array.isArray(d.workdays) ? d.workdays.map(Number) : [];
+  if (!workdays.includes(workday)) return { base: 0, blocked: 0, available: 0, intervals: [] };
+  const start = clockMinutes(workStartTime()), end = clockMinutes(workEndTime());
+  const events = d.events.filter(event => !event.date || event.date === date);
+  const intervals = freeWorkIntervals(events, start, end);
+  const blocked = mergedBlockedMinutes(events, start, end);
+  const lunchMinutes = d.lunchEnabled ? Math.max(0, Number(d.lunchDuration) || 0) : 0;
+  const fikaMinutes = d.fikaEnabled ? Math.max(0, Number(d.fikaDuration) || 0) : 0;
+  const base = Math.max(0, end - start - lunchMinutes - fikaMinutes);
+  return { base, blocked, available: Math.max(0, base - blocked), intervals };
+}
+function remainingConfiguredWorkCapacity(now = new Date(), planDate = todayKey()) {
+  const start = clockMinutes(workStartTime()), end = clockMinutes(workEndTime());
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const date = String(planDate || todayKey());
+  const workday = new Date(`${date}T00:00:00`).getDay();
+  const workdays = Array.isArray(d.workdays) ? d.workdays.map(Number) : [];
+  if (!workdays.includes(workday)) return { available: 0, blocked: 0, remaining: 0, intervals: [] };
+  const rangeStart = Math.max(start, nowMinutes);
+  if (rangeStart >= end) return { available: 0, blocked: 0, remaining: 0, intervals: [] };
+  const events = d.events.filter(event => !event.date || event.date === date);
+  const remaining = end - rangeStart;
+  const intervals = freeWorkIntervals(events, rangeStart, end);
+  const blocked = mergedBlockedMinutes(events, rangeStart, end);
+  const fullIntervals = freeWorkIntervals(events, start, end);
+  const fullFreeMinutes = fullIntervals.reduce((sum, interval) => sum + interval[1] - interval[0], 0);
+  const fullAvailable = configuredWorkCapacityForPlan(date).available;
+  const workFactor = fullFreeMinutes ? fullAvailable / fullFreeMinutes : 0;
+  const elapsedFreeMinutes = fullIntervals.reduce((sum, interval) => {
+    const elapsedEnd = Math.min(interval[1], rangeStart);
+    return sum + Math.max(0, elapsedEnd - interval[0]);
+  }, 0);
+  const available = Math.max(0, Math.floor(fullAvailable - elapsedFreeMinutes * workFactor));
+  return { available, blocked, remaining, intervals };
+}
 function remainingWorkCapacity(now = new Date()) {
   const start = clockMinutes(workStartTime()), end = clockMinutes(workEndTime());
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -477,7 +693,7 @@ function eveningSuggestion() {
   return { minutes: Math.min(120, evening.minutes), start: evening.start };
 }
 function riskFor(project) { if (!project.deadline) return 'green'; const days = Math.ceil((new Date(`${project.deadline}T00:00:00`) - new Date()) / 86400000); if (days <= 7 && project.progress < 70) return 'red'; if (days <= 21 && project.progress < 50) return 'yellow'; return 'green'; }
-function buildPlanProposal(availableMinutesForPlan, intervals) {
+function buildPlanProposal(availableMinutesForPlan, intervals, planDate = todayKey()) {
   const available = Math.floor(Math.max(0, availableMinutesForPlan) * DEFAULT_PLAN_UTILIZATION);
   const current = activePlan();
   const excluded = current.filter(item => item.planExcluded).map(item => ({ ...item }));
@@ -500,15 +716,15 @@ function buildPlanProposal(availableMinutesForPlan, intervals) {
     const stageMinutes = stageRemainingMinutes(stage, current);
     const minutes = Math.min(estimatedMinutes, slotMinutes, Number.isFinite(stageMinutes) ? stageMinutes : estimatedMinutes, Math.max(0, available - used));
     if (minutes < Math.min(30, estimatedMinutes)) continue;
-    candidates.push({ id: Date.now() + candidates.length, projectId: project.id, stageId: stage.id, name: `${project.name} · ${stage.name}`, minutes, estimatedMinutes, plannedMinutes: minutes, actualMinutes: 0, progress: stageProgress(stage), dailyProgress: 0, stageProgressApplied: 0, progressMode: 'manual', done: false, date: todayKey() });
+    candidates.push({ id: Date.now() + candidates.length, projectId: project.id, stageId: stage.id, name: `${project.name} · ${stage.name}`, minutes, estimatedMinutes, plannedMinutes: minutes, actualMinutes: 0, progress: stageProgress(stage), dailyProgress: 0, stageProgressApplied: 0, progressMode: 'manual', done: false, date: planDate });
     used += minutes;
     slots[slotIndex] -= minutes;
     if (candidates.length >= 3) break;
   }
   return [...preserved, ...excluded, ...candidates];
 }
-function openPlanProposal(available, mode, intervals) {
-  proposalDraft = buildPlanProposal(available, intervals);
+function openPlanProposal(available, mode, intervals, planDate = todayKey()) {
+  proposalDraft = buildPlanProposal(available, intervals, planDate);
   proposalMeta = { available, mode };
   const fixedIds = new Set(activePlan().filter(item => item.done || item.isExtra || item.recurringTaskId || item.planExcluded).map(item => String(item.id)));
   const rows = proposalDraft.filter(item => !item.planExcluded).map(item => {
@@ -519,12 +735,12 @@ function openPlanProposal(available, mode, intervals) {
   modal(mode === 'remaining' ? '현재 시간 기준 재계산' : '오늘 추천 다시 받기', `<div class="day-summary">남은 작업 가능 시간 <b>${minutesLabel(available)}</b><br>현재 계획은 아직 변경되지 않았어.</div><h4>현재 계획</h4>${currentRows}<h4>새 계획 미리보기</h4>${rows}<div class="detail">새 작업 예상 합계 ${minutesLabel(totalPlanned(proposalDraft))}</div><button class="primary wide" id="stagePlanProposal">이 제안 미리보기</button><button class="secondary wide" id="cancelPlanProposal">기존 계획 유지</button>`);
 }
 function recommend() {
-  const capacity = workCapacity();
-  openPlanProposal(capacity.available, 'basic', capacity.intervals);
+  const capacity = configuredWorkCapacityForPlan(todayKey());
+  openPlanProposal(capacity.available, 'basic', capacity.intervals, todayKey());
 }
 function recalculateFromNow() {
-  const capacity = remainingWorkCapacity();
-  openPlanProposal(capacity.available, 'remaining', capacity.intervals);
+  const capacity = remainingConfiguredWorkCapacity(new Date(), todayKey());
+  openPlanProposal(capacity.available, 'remaining', capacity.intervals, todayKey());
 }
 function renderTodayPlan(tasks) {
   if (!tasks.length) return '<div class="emptyplan">오늘 추천할 일이 없어. 쉬어도 괜찮아 🌿</div>';
@@ -721,6 +937,10 @@ function openCapture() { show('capture'); $('captureText').focus(); }
 $('close').onclick = closeModal;
 $('capture').onclick = openCapture;
 $('exportData').onclick = exportDataBackup;
+$('importData').onclick = () => $('importFileInput').click();
+$('importFileInput').onchange = event => importDataFile(event.target.files[0]);
+$('downloadImportBackup').onclick = downloadImportBackup;
+$('restoreImportBackup').onclick = restoreImportBackup;
 $('eveningButton').onclick = () => show('evening');
 $('backToToday').onclick = () => show('today');
 $('accept').onclick = () => { if (pendingPlan !== null) { const referencedProjectIds = new Set(pendingPlan.map(item => String(item.projectId))); d.projects.push(...pendingProjects.filter(project => referencedProjectIds.has(String(project.id)))); const otherDates = d.plan.filter(item => !isPlanForDate(item)); d.plan = [...otherDates, ...pendingPlan.map(item => ({ ...item, date: todayKey() }))]; d.plan.filter(item => isPlanForDate(item)).forEach(syncPlanToProject); pendingPlan = null; pendingPlanMeta = null; pendingProjects = []; } d.planAccepted = true; save(); $('headline').textContent = '좋아. 오늘은 이걸로 가자 🌿'; bounce(); render(); };
@@ -728,6 +948,11 @@ $('swap').onclick = openPlanChangeModal;
 $('saveWorkHours').onclick = () => {
   const start = $('workStartSetting').value;
   const end = $('workEndSetting').value;
+  const workdays = Array.from(document.querySelectorAll('[data-workday].selected')).map(button => Number(button.dataset.workday));
+  const lunchEnabled = $('lunchEnabled').checked;
+  const fikaEnabled = $('fikaEnabled').checked;
+  const lunchDuration = Number($('lunchDuration').value);
+  const fikaDuration = Number($('fikaDuration').value);
   const feedback = $('settingsFeedback');
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(start) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(end)) {
     feedback.textContent = '시작 시간과 종료 시간을 모두 입력해줘.';
@@ -737,13 +962,26 @@ $('saveWorkHours').onclick = () => {
     feedback.textContent = '종료 시간은 시작 시간보다 늦어야 해.';
     return;
   }
+  if (!workdays.length) {
+    feedback.textContent = '작업 가능 요일을 하나 이상 선택해줘.';
+    return;
+  }
+  if (lunchEnabled && (!Number.isInteger(lunchDuration) || lunchDuration < 5 || lunchDuration > 180 || lunchDuration % 5 !== 0)) {
+    feedback.textContent = '점심 시간은 5분 단위로 5분~180분 안에 선택해줘.';
+    return;
+  }
+  if (fikaEnabled && (!Number.isInteger(fikaDuration) || fikaDuration < 5 || fikaDuration > 180 || fikaDuration % 5 !== 0)) {
+    feedback.textContent = 'FIKA 시간은 5분 단위로 5분~180분 안에 선택해줘.';
+    return;
+  }
   try {
-    persistWorkHours(start, end);
-    feedback.textContent = '작업 시간을 저장했어. 확정된 오늘 계획은 그대로 유지돼.';
+    persistSettings({ start, end, workdays, lunchEnabled, lunchDuration, fikaEnabled, fikaDuration });
+    feedback.textContent = '작업 일정 설정을 저장했어. 기존 계획과 기록은 유지돼.';
+    renderSettings();
     render();
   } catch (error) {
-    console.error('작업 시간을 저장하지 못했어.', error);
-    feedback.textContent = '작업 시간을 저장하지 못했어. 기존 데이터는 변경하지 않았어.';
+    console.error('작업 일정 설정을 저장하지 못했어.', error);
+    feedback.textContent = '설정을 저장하지 못했어. 기존 데이터는 변경하지 않았어.';
   }
 };
 $('addEvent').onclick = () => modal('일정 추가', `<label class="label">날짜</label><input class="input" id="eventDate" type="date" value="${todayKey()}"><label class="label">시작 시간</label><input class="input" id="eventTime" type="time" value="09:00"><label class="label">종료 시간</label><input class="input" id="eventEnd" type="time" value="10:00"><label class="label">일정 이름</label><input class="input" id="eventName" placeholder="예: 발레">${preparationField(DEFAULT_PREPARATION_MINUTES)}<button class="primary wide" id="saveEvent">추가</button>`);
@@ -751,6 +989,8 @@ $('addProject').onclick = () => modal('프로젝트 추가', `<label class="labe
 $('saveCapture').onclick = () => { const text = $('captureText').value.trim(); if (!text) return; d.captures.push({ id: `capture-${Date.now()}`, text, at: new Date().toISOString() }); save(); $('captureText').value = ''; renderCaptures(); toast('기억해둘게. 나중에 프로젝트에 붙일 수 있어.'); };
 document.addEventListener('click', event => {
   const target = event.target;
+  if (target.id === 'confirmDataImport') { confirmDataImport(); return; }
+  if (target.id === 'cancelDataImport') { cancelDataImport(); return; }
   if (target.id === 'addPlannedTask') { openAddPlannedTask(); return; }
   if (target.id === 'addRecurring') { openRecurringEditor(); return; }
   const moreRecurringHistory = target.closest('[data-recurring-history-more]');
@@ -1069,5 +1309,12 @@ document.addEventListener('change', event => {
   }
 });
 document.querySelectorAll('nav button').forEach(button => button.onclick = () => show(button.dataset.screen));
+document.querySelectorAll('[data-workday]').forEach(button => button.onclick = () => {
+  button.classList.toggle('selected');
+  const selected = document.querySelectorAll('[data-workday].selected').length;
+  if (selected === 0) button.classList.add('selected');
+});
+$('lunchEnabled').onchange = updateSettingsDurationState;
+$('fikaEnabled').onchange = updateSettingsDurationState;
 registerAppServiceWorker();
-migrate(); ensureRecurringInstances(); render(); renderSettings();
+migrate(); ensureRecurringInstances(); render(); renderSettings(); updateImportBackupActions();
