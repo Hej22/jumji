@@ -41,7 +41,7 @@ const validExport = {
 
 const result = validateImportedData(validExport);
 assert.equal(result.valid, true, result.errors.join('; '));
-assert.deepEqual(summarizeImportedData(validExport), {
+assert.deepEqual(JSON.parse(JSON.stringify(summarizeImportedData(validExport))), {
   projects: 1,
   events: 1,
   plan: 1,
@@ -59,13 +59,16 @@ assert.match(invalid.errors.join('; '), /projects/);
 const noData = { projects: [], events: [], plan: [], captures: [] };
 assert.equal(validateImportedData(noData).valid, true);
 const legacyCandidate = prepareImportedData(noData, candidate => candidate);
-assert.deepEqual(legacyCandidate.recurringTasks, []);
-assert.deepEqual(legacyCandidate.dailyReviews, {});
-assert.deepEqual(legacyCandidate.deferReasons, {});
+assert.deepEqual(JSON.parse(JSON.stringify(legacyCandidate.recurringTasks)), []);
+assert.deepEqual(JSON.parse(JSON.stringify(legacyCandidate.recurringDecisions)), {});
+assert.deepEqual(JSON.parse(JSON.stringify(legacyCandidate.dailyReviews)), {});
+assert.deepEqual(JSON.parse(JSON.stringify(legacyCandidate.deferReasons)), {});
 assert.equal(legacyCandidate.planAccepted, false);
 
 const wrongReviewType = { ...validExport, dailyReviews: [] };
 assert.equal(validateImportedData(wrongReviewType).valid, false);
+assert.equal(validateImportedData({ ...validExport, recurringDecisions: { old: { templateId: 'r1', occurrenceDate: '2026-10-09', action: 'defer', planDate: '2026-10-12' } } }).valid, true);
+assert.equal(validateImportedData({ ...validExport, recurringDecisions: { old: { templateId: 'r1', occurrenceDate: '2026-10-09', action: 'defer', planDate: '2026-10-08' } } }).valid, false);
 
 const rootArray = [validExport];
 assert.equal(validateImportedData(rootArray).valid, false);

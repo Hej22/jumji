@@ -4,6 +4,7 @@
   const hasArray = (value, field) => Array.isArray(value[field]);
   const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value);
   const isValidTime = value => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+  const isValidDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(`${value}T00:00:00`).getTime());
   const isObjectArray = value => Array.isArray(value) && value.every(isObject);
 
   function validateImportedData(value) {
@@ -19,6 +20,9 @@
     }
     if (Object.prototype.hasOwnProperty.call(value, 'dailyReviews') && !isObject(value.dailyReviews)) {
       errors.push('dailyReviews 필드는 날짜별 기록 객체여야 합니다.');
+    }
+    if (Object.prototype.hasOwnProperty.call(value, 'recurringDecisions') && !isObject(value.recurringDecisions)) {
+      errors.push('recurringDecisions 필드는 객체여야 합니다.');
     }
     if (Object.prototype.hasOwnProperty.call(value, 'deferReasons') && !isObject(value.deferReasons)) {
       errors.push('deferReasons 필드는 객체여야 합니다.');
@@ -58,6 +62,12 @@
       || (review.events != null && !isObjectArray(review.events)))) {
       errors.push('dailyReviews의 각 날짜 기록과 tasks/events는 올바른 객체/배열이어야 합니다.');
     }
+    if (value.recurringDecisions && Object.values(value.recurringDecisions).some(decision => !isObject(decision)
+      || decision.templateId == null || !isValidDate(decision.occurrenceDate)
+      || decision.action !== 'defer'
+      || !isValidDate(decision.planDate) || decision.planDate <= decision.occurrenceDate)) {
+      errors.push('recurringDecisions의 각 항목은 유효한 1회 연기 결정이어야 합니다.');
+    }
     if (Object.prototype.hasOwnProperty.call(value, 'workStart') && !isValidTime(value.workStart)) errors.push('workStart는 HH:MM 형식이어야 합니다.');
     if (Object.prototype.hasOwnProperty.call(value, 'workEnd') && !isValidTime(value.workEnd)) errors.push('workEnd는 HH:MM 형식이어야 합니다.');
     if (isValidTime(value.workStart) && isValidTime(value.workEnd) && value.workEnd <= value.workStart) errors.push('workEnd는 workStart보다 늦어야 합니다.');
@@ -79,6 +89,7 @@
     if (typeof migrate !== 'function') throw new Error('가져온 데이터를 변환할 수 없습니다.');
     const candidate = JSON.parse(JSON.stringify(value));
     candidate.recurringTasks ??= [];
+    candidate.recurringDecisions ??= {};
     candidate.dailyReviews ??= {};
     candidate.deferReasons ??= {};
     candidate.planAccepted ??= false;

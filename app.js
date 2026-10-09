@@ -12,6 +12,7 @@ const DEFAULT_PLAN_UTILIZATION = 0.8;
 const DEFAULT_PREPARATION_MINUTES = 30;
 const EVENING_START = '20:00';
 const EVENING_END = '22:00';
+const PLAN_ENGINE = globalThis.JumjiPlannerEngine;
 const todayKey = () => {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -91,7 +92,7 @@ function migrate(target = d, { persistLegacyDates = target === d && Boolean(load
   });
   target.plan.forEach(item => syncPlanActualToProject(item, target.projects));
   target.captures = (target.captures || []).map((capture, index) => ({ ...capture, id: capture.id || `capture-${index}`, text: capture.text ?? capture.content ?? '', at: capture.at || capture.createdAt || new Date().toISOString() }));
-  target.planAccepted = Boolean(target.planAccepted); target.deferReasons = target.deferReasons || {}; target.dailyReviews = target.dailyReviews || {}; target.recurringTasks = Array.isArray(target.recurringTasks) ? target.recurringTasks : [];
+  target.planAccepted = Boolean(target.planAccepted); target.deferReasons = target.deferReasons || {}; target.dailyReviews = target.dailyReviews || {}; target.recurringTasks = Array.isArray(target.recurringTasks) ? target.recurringTasks : []; target.recurringDecisions = target.recurringDecisions || {};
   target.projects.forEach(syncProjectProgress);
   if (persistLegacyDates && assignedLegacyDates && target === d && loaded) {
     const raw = localStorage.getItem(KEY);
@@ -488,32 +489,75 @@ function recurrenceMatches(template, date) {
   }
   return false;
 }
-function ensureRecurringInstances(date = todayKey()) {
-  if (d.dailyReviews[date]?.confirmed) return false;
-  let changed = false;
+function ensureRecurringInstances() { return false; }
+function recurrenceOccurrenceKey(templateId, occurrenceDate) { return `${encodeURIComponent(String(templateId))}@${occurrenceDate}`; }
+function isConfiguredWorkday(date) {
+  const weekday = new Date(`${date}T00:00:00`).getDay();
+  return (Array.isArray(d.workdays) ? d.workdays.map(Number) : []).includes(weekday);
+}
+function nextConfiguredWorkday(date) {
+  const candidate = new Date(`${date}T00:00:00`);
+  for (let offset = 1; offset <= 366; offset++) {
+    candidate.setDate(candidate.getDate() + 1);
+    const key = `${candidate.getFullYear()}-${String(candidate.getMonth() + 1).padStart(2, '0')}-${String(candidate.getDate()).padStart(2, '0')}`;
+    if (isConfiguredWorkday(key)) return key;
+  }
+  return null;
+}
+function recurringOccurrenceRecorded(templateId, occurrenceDate) {
+  return d.plan.some(item => String(item.recurringTaskId) === String(templateId)
+    && String(item.recurringOccurrenceDate || item.date) === occurrenceDate)
+    || (d.dailyReviews[occurrenceDate]?.tasks || []).some(item => String(item.recurringTaskId) === String(templateId));
+}
+function offDayRecurringTasks(date) {
+  if (isConfiguredWorkday(date) || d.dailyReviews[date]?.confirmed) return [];
+  const occurrences = new Map();
+  d.recurringTasks.forEach(template => {
+    const key = recurrenceOccurrenceKey(template.id, date);
+    if (recurrenceMatches(template, date) && !d.recurringDecisions[key] && !recurringOccurrenceRecorded(template.id, date)) {
+      occurrences.set(key, { template, occurrenceDate: date, deferred: false });
+    }
+  });
+  Object.entries(d.recurringDecisions).forEach(([key, decision]) => {
+    if (decision?.action !== 'defer' || decision.planDate > date) return;
+    const template = d.recurringTasks.find(item => String(item.id) === String(decision.templateId));
+    if (template && recurrenceMatches(template, decision.occurrenceDate) && !recurringOccurrenceRecorded(template.id, decision.occurrenceDate)) {
+      occurrences.set(key, { template, occurrenceDate: decision.occurrenceDate, deferred: true });
+    }
+  });
+  return [...occurrences.values()];
+}
+function recurringOccurrencesForPlanDate(date) {
+  const occurrences = new Map();
   d.recurringTasks.forEach(template => {
     if (!recurrenceMatches(template, date)) return;
-    const exists = d.plan.some(item => item.recurringTaskId === template.id && item.date === date)
-      || (d.dailyReviews[date]?.tasks || []).some(item => item.recurringTaskId === template.id);
-    if (exists) return;
-    const project = d.projects.find(item => String(item.id) === String(template.projectId));
-    const stage = project?.stages.find(item => String(item.id) === String(template.stageId));
-    if (template.projectId && !project) return;
-    if (template.stageId && !stage) return;
-    const remaining = stage ? stageRemainingMinutes(stage, d.plan.filter(item => isPlanForDate(item, date))) : Infinity;
-    if (stage && remaining <= 0) return;
-    const minutes = Math.max(1, Math.min(Number(template.estimatedMinutes) || 30, Number.isFinite(remaining) ? remaining : 1440));
-    d.plan.push({
-      id: `repeat-${template.id}-${date}`, recurringTaskId: template.id, date, name: template.name,
-      projectId: project?.id ?? null, stageId: stage?.id ?? null, minutes, plannedMinutes: minutes,
-      estimatedMinutes: Number(stage?.estimatedMinutes) || minutes, actualMinutes: 0, dailyProgress: 0,
-      progress: stage ? stageProgress(stage) : 0, stageProgressApplied: 0, progressMode: 'manual', done: false, isExtra: false
-    });
-    d.planAccepted = false;
-    changed = true;
+    const occurrenceDate = date;
+    const decision = d.recurringDecisions[recurrenceOccurrenceKey(template.id, occurrenceDate)];
+    if (decision?.action === 'defer' && decision.planDate > date) return;
+    if (!recurringOccurrenceRecorded(template.id, occurrenceDate)) occurrences.set(recurrenceOccurrenceKey(template.id, occurrenceDate), { template, occurrenceDate });
   });
-  if (changed) save();
-  return changed;
+  Object.entries(d.recurringDecisions).forEach(([key, decision]) => {
+    if (decision?.action !== 'defer' || decision.planDate > date || !isConfiguredWorkday(date)) return;
+    const template = d.recurringTasks.find(item => String(item.id) === String(decision.templateId));
+    if (!template || !recurrenceMatches(template, decision.occurrenceDate) || recurringOccurrenceRecorded(template.id, decision.occurrenceDate)) return;
+    occurrences.set(key, { template, occurrenceDate: decision.occurrenceDate, deferred: true });
+  });
+  return [...occurrences.values()];
+}
+function latestUnfinishedHistory({ planDate, projectId = null, stageId = null, recurringTaskId = null }) {
+  const records = new Map();
+  const matches = item => recurringTaskId != null
+    ? String(item.recurringTaskId) === String(recurringTaskId)
+    : item.projectId != null && String(item.projectId) === String(projectId) && String(item.stageId) === String(stageId);
+  const add = (item, date, fromReview = false) => {
+    if (!date || date >= planDate || item.planExcluded || !matches(item)) return;
+    if (!fromReview && item.recurringTaskId && !item.plannedByEngine && !item.done && taskDailyProgress(item) === 0 && Number(item.actualMinutes) <= 0) return;
+    records.set(`${date}:${item.id}`, { ...item, date });
+  };
+  d.plan.forEach(item => add(item, item.date));
+  Object.entries(d.dailyReviews).forEach(([date, review]) => (review.tasks || []).forEach(item => add(item, date, true)));
+  const latest = [...records.values()].sort((left, right) => left.date.localeCompare(right.date) || String(left.id).localeCompare(String(right.id))).at(-1);
+  return latest && !latest.done && taskDailyProgress(latest) < 100 ? latest : null;
 }
 function recurrenceDescription(template) {
   if (template.frequency === 'weekly') return `매주 ${['일', '월', '화', '수', '목', '금', '토'][Number(template.weekday)]}요일`;
@@ -522,18 +566,26 @@ function recurrenceDescription(template) {
 }
 function recurringTaskHistory(template) {
   const records = new Map();
+  const addRecord = (item, date) => {
+    if (String(item.recurringTaskId) !== String(template.id) || !date || date > todayKey()) return;
+    const occurrenceDate = item.recurringOccurrenceDate || date;
+    const key = `${occurrenceDate}:${item.id}`;
+    records.set(key, {
+      date: item.date || date, occurrenceDate,
+      deferred: Boolean(item.deferredOccurrence || occurrenceDate !== (item.date || date)),
+      done: Boolean(item.done), dailyProgress: Number(item.dailyProgress) || 0,
+      actualMinutes: Number(item.actualMinutes) || 0
+    });
+  };
   d.plan.forEach(item => {
-    if (String(item.recurringTaskId) === String(template.id) && item.date && item.date <= todayKey()) records.set(item.date, item);
+    if (item.date) addRecord(item, item.date);
   });
   Object.entries(d.dailyReviews).forEach(([date, review]) => {
     if (date > todayKey()) return;
-    (review.tasks || []).forEach(item => {
-      if (String(item.recurringTaskId) === String(template.id)) records.set(date, item);
-    });
+    (review.tasks || []).forEach(item => addRecord(item, date));
   });
-  return [...records.entries()]
-    .sort(([dateA], [dateB]) => dateB.localeCompare(dateA))
-    .map(([date, item]) => ({ date, done: Boolean(item.done), dailyProgress: Number(item.dailyProgress) || 0, actualMinutes: Number(item.actualMinutes) || 0 }));
+  return [...records.values()]
+    .sort((left, right) => right.date.localeCompare(left.date) || right.occurrenceDate.localeCompare(left.occurrenceDate));
 }
 function renderRecurringTasks() {
   if (!$('recurringList')) return;
@@ -541,7 +593,7 @@ function renderRecurringTasks() {
     const history = recurringTaskHistory(template);
     const shown = recurringHistoryLimits.get(String(template.id)) || RECURRING_HISTORY_INITIAL;
     const visibleHistory = history.slice(0, shown);
-    const historyMarkup = history.length ? `<div class="recurring-history" aria-label="${esc(template.name)} 수행 기록"><b>최근 수행 기록</b><ul>${visibleHistory.map(record => `<li><time datetime="${esc(record.date)}">${esc(dateLabel(record.date))}</time><span class="recurring-status"><i class="history-dot ${record.done ? 'is-done' : 'is-undone'}" aria-hidden="true"></i><span>${record.done ? '완료' : '미완료'}</span></span><span class="recurring-record-detail">${record.dailyProgress}% · ${record.actualMinutes}분</span></li>`).join('')}</ul>${history.length > RECURRING_HISTORY_INITIAL ? `<div class="recurring-history-actions">${shown < history.length ? `<button class="secondary small-button" data-recurring-history-more="${esc(template.id)}" aria-label="${esc(template.name)} 이전 기록 더보기">더보기</button>` : ''}${shown > RECURRING_HISTORY_INITIAL ? `<button class="secondary small-button" data-recurring-history-collapse="${esc(template.id)}">접기</button>` : ''}</div>` : ''}</div>` : '<div class="recurring-history-empty">아직 확인할 수행 기록이 없어.</div>';
+    const historyMarkup = history.length ? `<div class="recurring-history" aria-label="${esc(template.name)} 수행 기록"><b>최근 수행 기록</b><ul>${visibleHistory.map(record => `<li><time datetime="${esc(record.date)}">${record.deferred ? `${esc(dateLabel(record.occurrenceDate))} 회차 · ${esc(dateLabel(record.date))} 배정` : esc(dateLabel(record.date))}</time><span class="recurring-status"><i class="history-dot ${record.done ? 'is-done' : 'is-undone'}" aria-hidden="true"></i><span>${record.done ? '완료' : '미완료'}</span></span><span class="recurring-record-detail">${record.dailyProgress}% · ${record.actualMinutes}분</span></li>`).join('')}</ul>${history.length > RECURRING_HISTORY_INITIAL ? `<div class="recurring-history-actions">${shown < history.length ? `<button class="secondary small-button" data-recurring-history-more="${esc(template.id)}" aria-label="${esc(template.name)} 이전 기록 더보기">더보기</button>` : ''}${shown > RECURRING_HISTORY_INITIAL ? `<button class="secondary small-button" data-recurring-history-collapse="${esc(template.id)}">접기</button>` : ''}</div>` : ''}</div>` : '<div class="recurring-history-empty">아직 확인할 수행 기록이 없어.</div>';
     const stateAction = template.active
       ? `<button class="secondary small-button" data-stop-recurring="${esc(template.id)}">중단</button>`
       : `<button class="secondary small-button" data-resume-recurring="${esc(template.id)}">재개</button>`;
@@ -601,11 +653,7 @@ function usableWorkSlots(intervals, availableMinutes) {
   return intervals.map(interval => Math.floor((interval[1] - interval[0]) * factor)).filter(minutes => minutes > 0);
 }
 function workCapacity() {
-  const start = clockMinutes(workStartTime()), end = clockMinutes(workEndTime());
-  const intervals = freeWorkIntervals(todayEvents(), start, end);
-  const blocked = mergedBlockedMinutes(todayEvents(), start, end);
-  const base = Math.max(0, end - start - DEFAULT_LUNCH_MINUTES - DEFAULT_FIKA_MINUTES);
-  return { base, blocked, available: Math.max(0, base - blocked), intervals };
+  return configuredWorkCapacityForPlan(todayKey());
 }
 function configuredWorkCapacityForPlan(planDate = todayKey()) {
   const date = String(planDate || todayKey());
@@ -684,7 +732,7 @@ function availableMinutes() { return workCapacity().available; }
 function minutesLabel(minutes) { const hours = Math.floor(minutes / 60), remainder = minutes % 60; return hours ? `${hours}시간${remainder ? ` ${remainder}분` : ''}` : `${remainder}분`; }
 function eveningSuggestion() {
   const capacity = workCapacity(), evening = eveningCapacity();
-  if (!evening.minutes) return null;
+  if (!isConfiguredWorkday(todayKey()) || !evening.minutes) return null;
   const urgent = d.projects.some(project => project.deadline && Math.ceil((new Date(`${project.deadline}T00:00:00`) - new Date()) / 86400000) <= 7 && project.progress < 100);
   const remaining = d.projects.reduce((sum, project) => sum + project.stages.filter(stage => stage.progress < 100).reduce((stageSum, stage) => stageSum + (Number(stage.estimatedMinutes) || 0), 0), 0);
   const daysToDeadline = d.projects.filter(project => project.deadline && project.progress < 100).map(project => Math.max(1, Math.ceil((new Date(`${project.deadline}T00:00:00`) - new Date()) / 86400000)));
@@ -694,45 +742,114 @@ function eveningSuggestion() {
 }
 function riskFor(project) { if (!project.deadline) return 'green'; const days = Math.ceil((new Date(`${project.deadline}T00:00:00`) - new Date()) / 86400000); if (days <= 7 && project.progress < 70) return 'red'; if (days <= 21 && project.progress < 50) return 'yellow'; return 'green'; }
 function buildPlanProposal(availableMinutesForPlan, intervals, planDate = todayKey()) {
-  const available = Math.floor(Math.max(0, availableMinutesForPlan) * DEFAULT_PLAN_UTILIZATION);
-  const current = activePlan();
+  const current = (pendingPlan || d.plan).filter(item => isPlanForDate(item, planDate));
   const excluded = current.filter(item => item.planExcluded).map(item => ({ ...item }));
-  const preserved = current.filter(item => !item.planExcluded && (item.done || item.isExtra || item.recurringTaskId)).map(item => ({ ...item }));
+  const preserved = current.filter(item => {
+    if (item.planExcluded) return false;
+    return d.planAccepted || item.done || item.isExtra || Number(item.actualMinutes) > 0 || taskDailyProgress(item) > 0
+      || (item.recurringTaskId && (d.planAccepted || !d.recurringTasks.some(template => String(template.id) === String(item.recurringTaskId))));
+  }).map(item => ({ ...item }));
+  const fixedIds = new Set([...preserved, ...excluded].map(item => String(item.id)));
   const preservedStages = new Set([...preserved, ...excluded].filter(item => item.projectId != null && item.stageId != null).map(item => `${item.projectId}:${item.stageId}`));
-  const slots = usableWorkSlots(intervals, availableMinutesForPlan);
-  const ranked = [...d.projects].sort((a, b) => {
-    const ad = a.deadline ? new Date(a.deadline).getTime() : Infinity, bd = b.deadline ? new Date(b.deadline).getTime() : Infinity;
-    return ad - bd || (b.importance || 3) - (a.importance || 3) || (a.progress || 0) - (b.progress || 0);
-  });
-  const candidates = []; let used = 0;
-  for (const project of ranked) {
-    if (used >= available) break;
-    const stage = project.stages.find(item => (item.progress || 0) < 100);
-    if (!stage) continue;
-    if (preservedStages.has(`${project.id}:${stage.id}`)) continue;
-    const estimatedMinutes = Number(stage.estimatedMinutes) || (project.deadline ? 90 : 60);
-    const slotIndex = slots.indexOf(Math.max(...slots));
-    const slotMinutes = slots[slotIndex] || 0;
-    const stageMinutes = stageRemainingMinutes(stage, current);
-    const minutes = Math.min(estimatedMinutes, slotMinutes, Number.isFinite(stageMinutes) ? stageMinutes : estimatedMinutes, Math.max(0, available - used));
-    if (minutes < Math.min(30, estimatedMinutes)) continue;
-    candidates.push({ id: Date.now() + candidates.length, projectId: project.id, stageId: stage.id, name: `${project.name} · ${stage.name}`, minutes, estimatedMinutes, plannedMinutes: minutes, actualMinutes: 0, progress: stageProgress(stage), dailyProgress: 0, stageProgressApplied: 0, progressMode: 'manual', done: false, date: planDate });
-    used += minutes;
-    slots[slotIndex] -= minutes;
-    if (candidates.length >= 3) break;
+  const candidateContext = [...preserved, ...excluded];
+  const candidatePool = [];
+  const existingOccurrence = (templateId, occurrenceDate) => current.find(item => String(item.recurringTaskId) === String(templateId)
+    && String(item.recurringOccurrenceDate || item.date) === occurrenceDate);
+
+  if (!d.dailyReviews[planDate]?.confirmed && Number(availableMinutesForPlan) > 0) {
+    d.projects.filter(project => project.status === '진행 중').forEach(project => {
+      const stage = project.stages.find(item => stageProgress(item) < 100);
+      if (!stage || preservedStages.has(`${project.id}:${stage.id}`)) return;
+      const estimatedMinutes = Number(stage.estimatedMinutes) || (project.deadline ? 90 : 60);
+      const stageRemaining = stageRemainingMinutes(stage, candidateContext);
+      const remainingMinutes = Math.max(0, Math.floor(Math.min(estimatedMinutes, Number.isFinite(stageRemaining) ? stageRemaining : estimatedMinutes)));
+      if (!remainingMinutes) return;
+      const history = latestUnfinishedHistory({ planDate, projectId: project.id, stageId: stage.id });
+      candidatePool.push({
+        id: `proposal-${planDate}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${candidatePool.length}`,
+        kind: 'project', projectId: project.id, stageId: stage.id,
+        name: `${project.name} · ${stage.name}`, deadline: /^\d{4}-\d{2}-\d{2}$/.test(project.deadline || '') ? project.deadline : null,
+        importance: project.importance, estimatedMinutes, remainingMinutes, stageRemainingMinutes: remainingMinutes,
+        allocationGroup: `${project.id}:${stage.id}`, groupRemainingMinutes: remainingMinutes,
+        hasUnfinishedHistory: Boolean(history), carryoverOf: history?.id ?? null,
+        progress: stageProgress(stage), actualMinutes: 0, dailyProgress: 0, stageProgressApplied: 0,
+        progressMode: 'manual', done: false, date: planDate
+      });
+    });
+
+    const recurrenceEntries = recurringOccurrencesForPlanDate(planDate);
+    current.filter(item => item.recurringTaskId && !fixedIds.has(String(item.id))).forEach(item => {
+      const occurrenceDate = item.recurringOccurrenceDate || item.date;
+      const template = d.recurringTasks.find(candidate => String(candidate.id) === String(item.recurringTaskId));
+      if (!template || !recurrenceMatches(template, occurrenceDate)) return;
+      if (!recurrenceEntries.some(entry => String(entry.template.id) === String(template.id) && entry.occurrenceDate === occurrenceDate)) {
+        recurrenceEntries.push({ template, occurrenceDate, existing: item });
+      }
+    });
+
+    recurrenceEntries.forEach(({ template, occurrenceDate, deferred, existing }) => {
+      const prior = existing || existingOccurrence(template.id, occurrenceDate);
+      if (prior && fixedIds.has(String(prior.id))) return;
+      const project = d.projects.find(item => String(item.id) === String(template.projectId));
+      const stage = project?.stages.find(item => String(item.id) === String(template.stageId));
+      if (template.projectId && (!project || project.status !== '진행 중')) return;
+      if (template.stageId && (!stage || stageProgress(stage) >= 100)) return;
+      const stageRemaining = stage ? stageRemainingMinutes(stage, candidateContext) : Infinity;
+      const templateMinutes = Math.max(1, Number(template.estimatedMinutes) || 30);
+      const remainingMinutes = Math.max(0, Math.floor(Math.min(templateMinutes, Number.isFinite(stageRemaining) ? stageRemaining : templateMinutes)));
+      if (!remainingMinutes) return;
+      const history = latestUnfinishedHistory({ planDate, recurringTaskId: template.id });
+      const decision = d.recurringDecisions[recurrenceOccurrenceKey(template.id, occurrenceDate)];
+      candidatePool.push({
+        id: prior?.id || `repeat-${template.id}-${occurrenceDate}`,
+        kind: 'recurring', recurringTaskId: template.id, recurringOccurrenceDate: occurrenceDate,
+        recurrenceDecisionKey: decision?.action === 'defer' ? recurrenceOccurrenceKey(template.id, occurrenceDate) : null,
+        projectId: project?.id ?? null, stageId: stage?.id ?? null,
+        name: prior?.name || template.name, deadline: /^\d{4}-\d{2}-\d{2}$/.test(project?.deadline || '') ? project.deadline : null,
+        importance: project?.importance, estimatedMinutes: templateMinutes, remainingMinutes,
+        stageRemainingMinutes: stage ? remainingMinutes : null,
+        allocationGroup: stage ? `${project.id}:${stage.id}` : null, groupRemainingMinutes: stage ? remainingMinutes : null,
+        hasUnfinishedHistory: Boolean(history), carryoverOf: history?.id ?? null,
+        progress: stage ? stageProgress(stage) : 0, actualMinutes: 0, dailyProgress: 0,
+        stageProgressApplied: 0, progressMode: 'manual', done: false, isCarryover: Boolean(history),
+        deferredOccurrence: Boolean(deferred || decision?.action === 'defer'), date: planDate
+      });
+    });
   }
-  return [...preserved, ...excluded, ...candidates];
+
+  const allocation = PLAN_ENGINE.allocateCandidates(candidatePool, availableMinutesForPlan, {
+    reservedMinutes: totalPlanned(preserved), utilization: DEFAULT_PLAN_UTILIZATION,
+    slots: usableWorkSlots(intervals, availableMinutesForPlan), planDate
+  });
+  const candidates = allocation.allocations.map(item => ({
+    ...item,
+    minutes: item.plannedMinutes,
+    plannedMinutes: item.plannedMinutes,
+    proposalCandidate: true,
+    isCarryover: Boolean(item.carryoverOf)
+  }));
+  const proposal = [...preserved, ...excluded, ...candidates];
+  Object.defineProperties(proposal, {
+    unallocated: { value: allocation.unallocated, enumerable: false },
+    allocationLimit: { value: allocation.allocationLimit, enumerable: false },
+    reservedMinutes: { value: allocation.reserved, enumerable: false }
+  });
+  return proposal;
 }
 function openPlanProposal(available, mode, intervals, planDate = todayKey()) {
   proposalDraft = buildPlanProposal(available, intervals, planDate);
-  proposalMeta = { available, mode };
-  const fixedIds = new Set(activePlan().filter(item => item.done || item.isExtra || item.recurringTaskId || item.planExcluded).map(item => String(item.id)));
+  proposalMeta = { available, mode, allocationLimit: proposalDraft.allocationLimit || 0, unallocated: proposalDraft.unallocated || [] };
   const rows = proposalDraft.filter(item => !item.planExcluded).map(item => {
-    const fixed = fixedIds.has(String(item.id));
-    return `<div class="proposal-row" data-proposal-row="${esc(item.id)}"><b>${esc(item.name)}</b><div class="detail">${fixed ? '완료/직접 추가한 작업 · 유지' : `${esc(taskProjectLabel(item))} · 예상 ${item.estimatedMinutes || item.minutes}분`}</div>${fixed ? `<div class="detail">배정 ${plannedMinutes(item)}분 · 실제 ${item.actualMinutes || 0}분</div>` : `<label class="label">오늘 배정 시간 (분)</label><input class="input proposal-minutes" type="number" min="0" max="${Math.max(0, available)}" value="${plannedMinutes(item)}" data-proposal-minutes="${esc(item.id)}"><button class="secondary small-button" data-remove-proposal="${esc(item.id)}">이번 추천에서 제외</button>`}</div>`;
+    const candidate = Boolean(item.proposalCandidate);
+    const label = item.recurringTaskId ? `반복 작업 · ${item.deferredOccurrence ? '이전 회차를 미룬 후보' : '이번 회차'}` : item.isCarryover ? '이전 미완료 작업에서 새로 제안' : '새 제안';
+    return `<div class="proposal-row" data-proposal-row="${esc(item.id)}"><b>${esc(item.name)}</b><div class="detail">${candidate ? `${label} · ${esc(taskProjectLabel(item))} · 전체 예상 ${item.estimatedMinutes || item.minutes}분` : '기존 완료/기록/직접 추가 계획 · 유지'}</div>${candidate ? `<label class="label">오늘 배정 시간 (분)</label><input class="input proposal-minutes" type="number" min="0" max="${Math.min(Math.max(0, available), Number(item.remainingMinutes) || plannedMinutes(item))}" value="${plannedMinutes(item)}" data-proposal-minutes="${esc(item.id)}"><button class="secondary small-button" data-remove-proposal="${esc(item.id)}">이번 추천에서 제외</button>` : `<div class="detail">배정 ${plannedMinutes(item)}분 · 실제 ${item.actualMinutes || 0}분</div>`}</div>`;
   }).join('') || '<div class="event">남은 시간에 제안할 작업이 없어. 기존 계획은 유지돼.</div>';
-  const currentRows = d.plan.filter(item => !item.planExcluded).map(item => `<div class="detail">· ${esc(item.name)} · ${plannedMinutes(item)}분${item.done ? ' · 완료' : ''}${item.isExtra ? ' · 직접 추가' : ''}</div>`).join('') || '<div class="detail">· 기존 계획 없음</div>';
-  modal(mode === 'remaining' ? '현재 시간 기준 재계산' : '오늘 추천 다시 받기', `<div class="day-summary">남은 작업 가능 시간 <b>${minutesLabel(available)}</b><br>현재 계획은 아직 변경되지 않았어.</div><h4>현재 계획</h4>${currentRows}<h4>새 계획 미리보기</h4>${rows}<div class="detail">새 작업 예상 합계 ${minutesLabel(totalPlanned(proposalDraft))}</div><button class="primary wide" id="stagePlanProposal">이 제안 미리보기</button><button class="secondary wide" id="cancelPlanProposal">기존 계획 유지</button>`);
+  const unallocatedRows = proposalMeta.unallocated.map(item => `<div class="detail">미배정 · ${esc(item.name)} · ${item.unallocatedMinutes}분</div>`).join('');
+  const offDayRows = offDayRecurringTasks(planDate).map(({ template, occurrenceDate, deferred }) => `<div class="proposal-row"><b>${esc(template.name)}</b><div class="detail">${esc(recurrenceDescription(template))} · 회차 ${esc(occurrenceDate)} · ${deferred ? '아직 미배정으로 남아 있어.' : '오늘은 작업 가능 요일이 아니야.'} 기존 반복 규칙과 기록은 유지돼.</div><button class="secondary small-button" data-offday-recurring="defer" data-id="${esc(template.id)}" data-date="${esc(occurrenceDate)}" data-plan-date="${esc(planDate)}">다음 작업일에 1회 미루기</button></div>`).join('');
+  const currentRows = d.plan.filter(item => isPlanForDate(item, planDate) && !item.planExcluded).map(item => `<div class="detail">· ${esc(item.name)} · ${plannedMinutes(item)}분${item.done ? ' · 완료' : ''}${item.isExtra ? ' · 직접 추가' : ''}</div>`).join('') || '<div class="detail">· 기존 계획 없음</div>';
+  const capacityMessage = available <= 0 ? '오늘은 설정된 작업 가능 시간이 없어. 기존 계획은 자동 변경되지 않아.' : `신규 배정 한도 ${minutesLabel(proposalMeta.allocationLimit)} · 나머지 작업은 다음 날로 자동 예약되지 않아.`;
+  const stageButton = available > 0 ? '<button class="primary wide" id="stagePlanProposal">이 제안 미리보기</button>' : '';
+  modal(mode === 'remaining' ? '현재 시간 기준 재계산' : '오늘 추천 다시 받기', `<div class="day-summary">오늘 작업 가능 시간 <b>${minutesLabel(available)}</b><br>${capacityMessage}<br>현재 계획은 아직 변경되지 않았어.</div>${offDayRows ? `<h4>비작업일 반복 회차</h4>${offDayRows}` : ''}<h4>현재 계획</h4>${currentRows}<h4>새 계획 미리보기</h4>${rows}${unallocatedRows}<div class="detail">제안 작업 합계 ${minutesLabel(totalPlanned(proposalDraft))}</div>${stageButton}<button class="secondary wide" id="cancelPlanProposal">기존 계획 유지</button>`);
 }
 function recommend() {
   const capacity = configuredWorkCapacityForPlan(todayKey());
@@ -747,7 +864,10 @@ function renderTodayPlan(tasks) {
   const cards = tasks.map((item, index) => {
     const progress = taskDailyProgress(item);
     const stage = d.projects.find(project => project.id == item.projectId)?.stages.find(candidate => candidate.id == item.stageId);
-    return `<div class="item task ${item.done ? 'done' : ''}"><button class="check ${item.done ? 'checked' : ''}" data-task-check="${esc(item.id)}" aria-label="${esc(item.name)} 완료">${item.done ? '✓' : ''}</button><div class="taskmain"><div class="taskline"><b>${esc(item.name)} · 오늘 ${progressLabel(progress)}</b><span>배정 <input class="time-input plan-time-input" type="number" min="1" max="1440" step="1" value="${plannedMinutes(item)}" data-plan-minutes="${esc(item.id)}" aria-label="${esc(item.name)} 오늘 배정 시간 (분)">분</span></div><div class="progressrow"><input type="range" min="0" max="100" step="1" value="${progress}" data-task-progress="${esc(item.id)}" aria-label="${esc(item.name)} 오늘 진척도"><span class="progress-percent"><input class="percent" type="number" min="0" max="100" step="1" value="${progress}" data-task-percent="${esc(item.id)}">%</span></div>${stage ? `<div class="detail stage-progress-label">단계 전체 진척도 ${percentText(stageProgress(stage))}</div>` : ''}<div class="time-row">실제 작업 시간 <input class="time-input" type="number" min="0" value="${item.actualMinutes}" data-task-actual="${esc(item.id)}">분</div><div class="plan-task-actions"><button class="secondary small-button" data-plan-move="up" data-id="${esc(item.id)}" aria-label="${esc(item.name)} 위로 이동" ${index === 0 ? 'disabled' : ''}>↑</button><button class="secondary small-button" data-plan-move="down" data-id="${esc(item.id)}" aria-label="${esc(item.name)} 아래로 이동" ${index === tasks.length - 1 ? 'disabled' : ''}>↓</button>${item.isExtra ? `<button class="secondary small-button" data-plan-edit="${esc(item.id)}">수정</button>` : ''}<button class="danger plan-remove" data-plan-remove="${esc(item.id)}" aria-label="오늘 계획에서 제외">×</button></div>${item.recurringTaskId ? '<div class="detail">반복 작업 · 오늘 인스턴스</div>' : item.isExtra ? '<div class="detail">직접 추가한 작업</div>' : ''}</div></div>`;
+    const recurringLabel = item.recurringTaskId ? item.deferredOccurrence
+      ? `반복 회차 ${dateLabel(item.recurringOccurrenceDate)} · 미뤄서 배정`
+      : '반복 작업 · 오늘 회차' : '';
+    return `<div class="item task ${item.done ? 'done' : ''}"><button class="check ${item.done ? 'checked' : ''}" data-task-check="${esc(item.id)}" aria-label="${esc(item.name)} 완료">${item.done ? '✓' : ''}</button><div class="taskmain"><div class="taskline"><b>${esc(item.name)} · 오늘 ${progressLabel(progress)}</b><span>배정 <input class="time-input plan-time-input" type="number" min="1" max="1440" step="1" value="${plannedMinutes(item)}" data-plan-minutes="${esc(item.id)}" aria-label="${esc(item.name)} 오늘 배정 시간 (분)">분</span></div><div class="progressrow"><input type="range" min="0" max="100" step="1" value="${progress}" data-task-progress="${esc(item.id)}" aria-label="${esc(item.name)} 오늘 진척도"><span class="progress-percent"><input class="percent" type="number" min="0" max="100" step="1" value="${progress}" data-task-percent="${esc(item.id)}">%</span></div>${stage ? `<div class="detail stage-progress-label">단계 전체 진척도 ${percentText(stageProgress(stage))}</div>` : ''}<div class="time-row">실제 작업 시간 <input class="time-input" type="number" min="0" value="${item.actualMinutes}" data-task-actual="${esc(item.id)}">분</div><div class="plan-task-actions"><button class="secondary small-button" data-plan-move="up" data-id="${esc(item.id)}" aria-label="${esc(item.name)} 위로 이동" ${index === 0 ? 'disabled' : ''}>↑</button><button class="secondary small-button" data-plan-move="down" data-id="${esc(item.id)}" aria-label="${esc(item.name)} 아래로 이동" ${index === tasks.length - 1 ? 'disabled' : ''}>↓</button>${item.isExtra ? `<button class="secondary small-button" data-plan-edit="${esc(item.id)}">수정</button>` : ''}<button class="danger plan-remove" data-plan-remove="${esc(item.id)}" aria-label="오늘 계획에서 제외">×</button></div>${item.recurringTaskId ? `<div class="detail">${esc(recurringLabel)}</div>` : item.isExtra ? '<div class="detail">직접 추가한 작업</div>' : ''}</div></div>`;
   }).join('');
   return cards;
 }
@@ -775,7 +895,10 @@ function render() {
   const visiblePlan = activePlan();
   const available = pendingPlanMeta?.available ?? capacity.available;
   const plannedTotal = totalPlanned(visiblePlan);
-  $('capacity').innerHTML = `<div class="capacity-card"><div class="capacity-metrics"><span>오늘 작업 가능한 시간 <b>${minutesLabel(available)}</b></span><span>작업 예상 시간 <b>${minutesLabel(plannedTotal)}</b></span></div><span class="muted">기본 ${workStartTime()}~${workEndTime()} · 점심 ${DEFAULT_LUNCH_MINUTES}분 · fika ${DEFAULT_FIKA_MINUTES}분 · 일정/준비시간 반영</span><button class="secondary wide recalculate-button" id="recalculatePlan">현재 시간으로 다시 계산하기</button></div>`;
+  const lunchLabel = d.lunchEnabled ? `${Number(d.lunchDuration) || DEFAULT_LUNCH_MINUTES}분` : '없음';
+  const fikaLabel = d.fikaEnabled ? `${Number(d.fikaDuration) || DEFAULT_SETTINGS_FIKA_MINUTES}분` : '없음';
+  const overCapacity = plannedTotal > capacity.available;
+  $('capacity').innerHTML = `<div class="capacity-card"><div class="capacity-metrics"><span>오늘 작업 가능한 시간 <b>${minutesLabel(available)}</b></span><span>작업 예상 시간 <b>${minutesLabel(plannedTotal)}</b></span></div><span class="muted">기본 ${workStartTime()}~${workEndTime()} · 점심 ${lunchLabel} · FIKA ${fikaLabel} · 일정/준비시간 반영</span>${overCapacity ? `<span class="muted" role="status">현재 계획이 설정한 작업 가능 시간보다 ${minutesLabel(plannedTotal - capacity.available)} 많아. 기존 계획은 자동으로 바꾸지 않았어.</span>` : ''}<button class="secondary wide recalculate-button" id="recalculatePlan">현재 시간으로 다시 계산하기</button></div>`;
   $('events').innerHTML = events.map(event => `<button class="pill eventpill" data-event-id="${event.id}">🕐 ${esc(event.time)}${event.end ? `–${esc(event.end)}` : ''} ${esc(event.name)} <span class="source">${event.source === 'external' ? '외부 일정' : '점지 일정'}</span></button>`).join('') || '<span class="muted">오늘 등록된 일정이 없어.</span>';
   $('plan').innerHTML = renderTodayPlan(visiblePlan.filter(item => !item.planExcluded));
   const suggestion = eveningSuggestion();
@@ -937,12 +1060,14 @@ function openCapture() { show('capture'); $('captureText').focus(); }
 $('close').onclick = closeModal;
 $('capture').onclick = openCapture;
 $('exportData').onclick = exportDataBackup;
+$('recommendPlan').onclick = recommend;
 $('importData').onclick = () => $('importFileInput').click();
 $('importFileInput').onchange = event => importDataFile(event.target.files[0]);
 $('downloadImportBackup').onclick = downloadImportBackup;
 $('restoreImportBackup').onclick = restoreImportBackup;
 $('eveningButton').onclick = () => show('evening');
 $('backToToday').onclick = () => show('today');
+$('accept').onclick = () => { if (pendingPlan !== null) { const referencedProjectIds = new Set(pendingPlan.map(item => String(item.projectId))); d.projects.push(...pendingProjects.filter(project => referencedProjectIds.has(String(project.id)))); const otherDates = d.plan.filter(item => !isPlanForDate(item)); d.plan = [...otherDates, ...pendingPlan.map(item => ({ ...item, date: todayKey() }))]; d.plan.filter(item => isPlanForDate(item)).forEach(syncPlanToProject); pendingPlan = null; pendingPlanMeta = null; pendingProjects = []; } d.planAccepted = true; save(); $('headline').textContent = '좋아. 오늘은 이걸로 가자 🌿'; bounce(); render(); };
 $('accept').onclick = () => { if (pendingPlan !== null) { const referencedProjectIds = new Set(pendingPlan.map(item => String(item.projectId))); d.projects.push(...pendingProjects.filter(project => referencedProjectIds.has(String(project.id)))); const otherDates = d.plan.filter(item => !isPlanForDate(item)); d.plan = [...otherDates, ...pendingPlan.map(item => ({ ...item, date: todayKey() }))]; d.plan.filter(item => isPlanForDate(item)).forEach(syncPlanToProject); pendingPlan = null; pendingPlanMeta = null; pendingProjects = []; } d.planAccepted = true; save(); $('headline').textContent = '좋아. 오늘은 이걸로 가자 🌿'; bounce(); render(); };
 $('swap').onclick = openPlanChangeModal;
 $('saveWorkHours').onclick = () => {
@@ -1130,6 +1255,20 @@ document.addEventListener('click', event => {
   }
   if (target.id === 'recalculatePlan') { recalculateFromNow(); return; }
   if (target.id === 'cancelPlanProposal') { proposalDraft = null; proposalMeta = null; closeModal(); return; }
+  const offDayRecurring = target.closest('[data-offday-recurring]');
+  if (offDayRecurring) {
+    const template = d.recurringTasks.find(item => String(item.id) === offDayRecurring.dataset.id);
+    const occurrenceDate = offDayRecurring.dataset.date;
+    if (!template || !recurrenceMatches(template, occurrenceDate) || recurringOccurrenceRecorded(template.id, occurrenceDate)) return;
+    const key = recurrenceOccurrenceKey(template.id, occurrenceDate);
+    if (offDayRecurring.dataset.offdayRecurring === 'defer') {
+      const planDate = nextConfiguredWorkday(offDayRecurring.dataset.planDate || occurrenceDate);
+      if (!planDate) { toast('다음 작업 가능 요일을 찾지 못했어. 작업 요일 설정을 확인해줘.'); return; }
+      d.recurringDecisions[key] = { templateId: template.id, occurrenceDate, action: 'defer', planDate, decidedAt: new Date().toISOString() };
+      save(); closeModal(); render(); toast(`${planDate} 후보로 1회 미뤘어. 그날 제안에서 확인하고 확정해줘.`);
+    }
+    return;
+  }
   if (target.id === 'stagePlanProposal') {
     if (!proposalDraft || !proposalMeta) return;
     const rows = new Map([...document.querySelectorAll('[data-proposal-row]')].map(row => [row.dataset.proposalRow, row]));
@@ -1139,15 +1278,31 @@ document.addEventListener('click', event => {
       if (!row) return [];
       const minutesInput = row.querySelector('[data-proposal-minutes]');
       if (minutesInput) {
-        const minutes = Math.max(0, Math.round(Number(minutesInput.value) || 0));
+        const candidateLimit = Math.max(0, Number(item.remainingMinutes) || plannedMinutes(item));
+        const minutes = Math.min(candidateLimit, Math.max(0, Math.round(Number(minutesInput.value) || 0)));
         if (!minutes) return [];
         item.plannedMinutes = minutes;
       }
       return [{ ...item }];
     });
-    const proposedMinutes = stagedPlan.filter(item => !item.planExcluded && !item.done && !item.isExtra).reduce((sum, item) => sum + plannedMinutes(item), 0);
-    if (proposedMinutes > Math.floor(proposalMeta.available * DEFAULT_PLAN_UTILIZATION)) { toast('새 작업 시간이 남은 계획 시간보다 길어. 시간을 줄이거나 작업을 제외해줘.'); return; }
-    pendingPlan = stagedPlan;
+    const proposedMinutes = stagedPlan.filter(item => item.proposalCandidate).reduce((sum, item) => sum + plannedMinutes(item), 0);
+    if (proposedMinutes > proposalMeta.allocationLimit) { toast('새 작업 시간이 남은 계획 시간보다 길어. 시간을 줄이거나 작업을 제외해줘.'); return; }
+    const stageAllocations = new Map();
+    const stageLimits = new Map();
+    stagedPlan.filter(item => item.proposalCandidate && item.allocationGroup).forEach(item => {
+      stageAllocations.set(item.allocationGroup, (stageAllocations.get(item.allocationGroup) || 0) + plannedMinutes(item));
+      stageLimits.set(item.allocationGroup, Number(item.groupRemainingMinutes) || 0);
+    });
+    if ([...stageAllocations].some(([group, minutes]) => minutes > stageLimits.get(group))) {
+      toast('같은 단계의 제안 작업 합계가 남은 예상 작업량보다 길어. 시간을 줄여줘.');
+      return;
+    }
+    pendingPlan = stagedPlan.map(item => {
+      const saved = { ...item };
+      if (item.proposalCandidate) saved.plannedByEngine = true;
+      ['proposalCandidate', 'remainingMinutes', 'stageRemainingMinutes', 'allocationGroup', 'groupRemainingMinutes', 'recurrenceDecisionKey'].forEach(field => delete saved[field]);
+      return saved;
+    });
     pendingPlanMeta = proposalMeta;
     proposalDraft = null; proposalMeta = null; closeModal(); render(); return;
   }
