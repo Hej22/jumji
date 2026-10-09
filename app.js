@@ -859,6 +859,14 @@ function recalculateFromNow() {
   const capacity = remainingConfiguredWorkCapacity(new Date(), todayKey());
   openPlanProposal(capacity.available, 'remaining', capacity.intervals, todayKey());
 }
+function planTaskDisplayName(item) {
+  const project = d.projects.find(candidate => String(candidate.id) === String(item.projectId));
+  const stage = project?.stages.find(candidate => String(candidate.id) === String(item.stageId));
+  const projectName = project?.name || item.projectNameAtReview || item.projectName || '';
+  const stageName = stage?.name || item.stageNameAtReview || item.stageName || '';
+  const estimate = Number(stage?.estimatedMinutes) || Number(item.estimatedMinutes) || 0;
+  return PLAN_ENGINE.formatPlanTaskTitle(projectName, stageName, plannedMinutes(item), estimate, item.name);
+}
 function renderTodayPlan(tasks) {
   if (!tasks.length) return '<div class="emptyplan">오늘 추천할 일이 없어. 쉬어도 괜찮아 🌿</div>';
   const cards = tasks.map((item, index) => {
@@ -867,7 +875,8 @@ function renderTodayPlan(tasks) {
     const recurringLabel = item.recurringTaskId ? item.deferredOccurrence
       ? `반복 회차 ${dateLabel(item.recurringOccurrenceDate)} · 미뤄서 배정`
       : '반복 작업 · 오늘 회차' : '';
-    return `<div class="item task ${item.done ? 'done' : ''}"><button class="check ${item.done ? 'checked' : ''}" data-task-check="${esc(item.id)}" aria-label="${esc(item.name)} 완료">${item.done ? '✓' : ''}</button><div class="taskmain"><div class="taskline"><b>${esc(item.name)} · 오늘 ${progressLabel(progress)}</b><span>배정 <input class="time-input plan-time-input" type="number" min="1" max="1440" step="1" value="${plannedMinutes(item)}" data-plan-minutes="${esc(item.id)}" aria-label="${esc(item.name)} 오늘 배정 시간 (분)">분</span></div><div class="progressrow"><input type="range" min="0" max="100" step="1" value="${progress}" data-task-progress="${esc(item.id)}" aria-label="${esc(item.name)} 오늘 진척도"><span class="progress-percent"><input class="percent" type="number" min="0" max="100" step="1" value="${progress}" data-task-percent="${esc(item.id)}">%</span></div>${stage ? `<div class="detail stage-progress-label">단계 전체 진척도 ${percentText(stageProgress(stage))}</div>` : ''}<div class="time-row">실제 작업 시간 <input class="time-input" type="number" min="0" value="${item.actualMinutes}" data-task-actual="${esc(item.id)}">분</div><div class="plan-task-actions"><button class="secondary small-button" data-plan-move="up" data-id="${esc(item.id)}" aria-label="${esc(item.name)} 위로 이동" ${index === 0 ? 'disabled' : ''}>↑</button><button class="secondary small-button" data-plan-move="down" data-id="${esc(item.id)}" aria-label="${esc(item.name)} 아래로 이동" ${index === tasks.length - 1 ? 'disabled' : ''}>↓</button>${item.isExtra ? `<button class="secondary small-button" data-plan-edit="${esc(item.id)}">수정</button>` : ''}<button class="danger plan-remove" data-plan-remove="${esc(item.id)}" aria-label="오늘 계획에서 제외">×</button></div>${item.recurringTaskId ? `<div class="detail">${esc(recurringLabel)}</div>` : item.isExtra ? '<div class="detail">직접 추가한 작업</div>' : ''}</div></div>`;
+    const displayName = planTaskDisplayName(item);
+    return `<div class="item task ${item.done ? 'done' : ''}"><button class="check ${item.done ? 'checked' : ''}" data-task-check="${esc(item.id)}" aria-label="${esc(displayName)} 완료">${item.done ? '✓' : ''}</button><div class="taskmain"><div class="taskline"><b>${esc(displayName)}</b><span>배정 <input class="time-input plan-time-input" type="number" min="1" max="1440" step="1" value="${plannedMinutes(item)}" data-plan-minutes="${esc(item.id)}" aria-label="${esc(displayName)} 오늘 배정 시간 (분)" title="오늘 배정 시간 변경"></span>분</div><div class="progressrow"><input type="range" min="0" max="100" step="1" value="${progress}" data-task-progress="${esc(item.id)}" aria-label="${esc(displayName)} 오늘 진척도"><span class="progress-percent"><input class="percent" type="number" min="0" max="100" step="1" value="${progress}" data-task-percent="${esc(item.id)}">%</span></div>${stage ? `<div class="detail stage-progress-label">단계 전체 진척도 ${percentText(stageProgress(stage))}</div>` : ''}<div class="time-row">실제 작업 시간 <input class="time-input" type="number" min="0" value="${item.actualMinutes}" data-task-actual="${esc(item.id)}">분</div><div class="plan-task-actions"><button class="secondary small-button" data-plan-move="up" data-id="${esc(item.id)}" aria-label="${esc(displayName)} 위로 이동" ${index === 0 ? 'disabled' : ''}>↑</button><button class="secondary small-button" data-plan-move="down" data-id="${esc(item.id)}" aria-label="${esc(displayName)} 아래로 이동" ${index === tasks.length - 1 ? 'disabled' : ''}>↓</button>${item.isExtra ? `<button class="secondary small-button" data-plan-edit="${esc(item.id)}">수정</button>` : ''}<button class="danger plan-remove" data-plan-remove="${esc(item.id)}" aria-label="오늘 계획에서 제외">×</button></div>${item.recurringTaskId ? `<div class="detail">${esc(recurringLabel)}</div>` : item.isExtra ? '<div class="detail">직접 추가한 작업</div>' : ''}</div></div>`;
   }).join('');
   return cards;
 }
@@ -913,13 +922,23 @@ function openAddTodayTask() {
   modal('오늘 한 일 추가', `<label>무엇을 했어?<input class="input" id="extraName" placeholder="작업명"></label><label>어디에 한 일이야?<select class="input" id="extraLink"><option value="">프로젝트 없음</option>${options}</select></label><label>실제 작업 시간 (분)<input class="input" id="extraActual" type="number" min="0" value="30"></label><label>오늘 작업 진척도 (%)<input class="input" id="extraProgress" type="number" min="0" max="100" value="0"></label><button class="primary wide" id="saveExtraTask">저장하기</button>`);
 }
 function openAddPlannedTask() {
-  const projectOptions = allProjects().map(project => `<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('');
-  modal('계획에 작업 추가', `<label class="label" for="plannedMode">추가 방식</label><select class="input" id="plannedMode"><option value="existing">기존 프로젝트의 작업/단계</option><option value="independent">독립 작업</option><option value="newProject">새 프로젝트와 작업</option></select><div id="plannedExistingFields"><label class="label" for="plannedProject">프로젝트</label><select class="input" id="plannedProject">${projectOptions || '<option value="">등록된 프로젝트 없음</option>'}</select><label class="label" for="plannedStage">단계</label><select class="input" id="plannedStage"></select></div><div id="plannedNewProjectFields" class="hidden"><label class="label" for="plannedProjectName">새 프로젝트 이름</label><input class="input" id="plannedProjectName" maxlength="120" placeholder="프로젝트 이름"></div><label class="label" for="plannedTaskName">작업명</label><input class="input" id="plannedTaskName" maxlength="120" placeholder="작업명"><label class="label" for="plannedTaskMinutes">오늘 배정 시간 (분)</label><input class="input" id="plannedTaskMinutes" type="number" min="1" max="1440" step="1" value="30"><div class="muted">오늘 계획의 배정 시간만 바뀌며, 단계 예상 시간은 유지돼.</div><button class="primary wide" id="savePlannedTask">계획에 추가</button>`);
+  const projectOptions = allProjects().filter(project => project.status !== '완료').map(project => `<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('');
+  modal('계획에 작업 추가', `<label class="label" for="plannedMode">추가 방식</label><select class="input" id="plannedMode"><option value="existing">기존 프로젝트의 단계 작업</option><option value="independent">독립 작업</option><option value="newProject">새 프로젝트와 작업</option></select><div id="plannedExistingFields"><label class="label" for="plannedProject">프로젝트</label><select class="input" id="plannedProject">${projectOptions || '<option value="">등록된 프로젝트 없음</option>'}</select><label class="label" for="plannedStage">기존 단계</label><select class="input" id="plannedStage"></select></div><div id="plannedNewProjectFields" class="hidden"><label class="label" for="plannedProjectName">새 프로젝트 이름</label><input class="input" id="plannedProjectName" maxlength="120" placeholder="프로젝트 이름"></div><label class="label" for="plannedTaskName">작업명</label><input class="input" id="plannedTaskName" maxlength="120" placeholder="작업명" readonly><label class="label" for="plannedTaskMinutes">오늘 배정 시간 (분)</label><input class="input" id="plannedTaskMinutes" type="number" min="1" max="1440" step="1" value="30"><div class="muted">기존 단계 선택은 프로젝트·단계와 전체 예상 시간을 유지해. 오늘 배정 시간만 별도로 설정해.</div><button class="primary wide" id="savePlannedTask">계획에 추가</button>`);
   populatePlannedStages();
 }
 function populatePlannedStages() {
   const project = allProjects().find(item => String(item.id) === $('plannedProject')?.value);
   if ($('plannedStage')) $('plannedStage').innerHTML = (project?.stages || []).map(stage => `<option value="${esc(stage.id)}">${esc(stage.name)}</option>`).join('') || '<option value="">단계 없음</option>';
+  updatePlannedTaskName();
+}
+function updatePlannedTaskName() {
+  const nameInput = $('plannedTaskName');
+  if (!nameInput || $('plannedMode')?.value !== 'existing') return;
+  const project = allProjects().find(item => String(item.id) === $('plannedProject')?.value);
+  const stage = project?.stages.find(item => String(item.id) === $('plannedStage')?.value);
+  nameInput.value = project && stage ? `${project.name} - ${stage.name}` : '';
+  nameInput.readOnly = true;
+  nameInput.dataset.generatedName = 'true';
 }
 function openEditPlannedTask(id) {
   const item = activePlan().find(task => String(task.id) === String(id));
@@ -1049,11 +1068,31 @@ function openPlanChangeModal() {
     planChangeDraft = activePlan().map(item => ({ ...item }));
   }
   const blocks = planChangeDraft.map((item, index) => {
+    if (item.planExcluded) return `<div class="swapblock"><div class="swapfrom">🐾 ${esc(item.name)}</div><div class="muted">오늘은 쉬기로 했어. 배정 ${plannedMinutes(item)}분은 다른 작업을 다시 선택할 때 사용할 수 있어.</div><button class="choice small" data-restore-swap-i="${index}">다시 고르기</button></div>`;
     if (item.done || item.isExtra || item.recurringTaskId) return `<div class="swapblock"><div class="swapfrom">🐾 ${esc(item.name)}</div><div class="muted">${item.recurringTaskId ? '반복 작업의 오늘 인스턴스는 유지돼.' : '완료/직접 추가한 작업은 유지돼.'}</div></div>`;
     const choices = d.projects.map(project => `<button class="choice small" data-swap-i="${index}" data-p="${project.id}">${esc(project.name)}</button>`).join('');
     return `<div class="swapblock"><div class="swapfrom">🐾 ${esc(item.name)}</div><div class="arrow">이걸 → 뭘로 바꿀까?</div><div class="choices">${choices}<button class="choice small" data-swap-i="${index}" data-rest="1">오늘은 쉬기</button></div></div>`;
   }).join('');
   modal('오늘 할 일을 바꾸자', blocks + (planChangeDraft.length ? '<div class="change-preview"><b>변경 결과를 미리 확인해줘.</b><div class="muted">아직 저장되지 않았어. 확인 후 오늘 화면에서 확정할 수 있어.</div><button class="primary wide" id="applyPlanChange">변경 미리보기</button><button class="secondary wide" id="cancelPlanChange">취소</button></div>' : '<div class="muted">오늘은 쉬어도 괜찮아.</div><button class="secondary wide" id="cancelPlanChange">취소</button>'));
+}
+function replacePlanChangeSlot(index, projectId) {
+  const current = planChangeDraft?.[index];
+  const project = d.projects.find(item => String(item.id) === String(projectId));
+  const stage = project?.stages.find(item => stageProgress(item) < 100);
+  if (!current || !project || !stage) return false;
+  const otherTasks = planChangeDraft.filter((_, itemIndex) => itemIndex !== index);
+  const remaining = stageRemainingMinutes(stage, otherTasks);
+  if (remaining <= 0) { toast('이 단계에 남은 예상 작업량이 없어.'); return false; }
+  const available = pendingPlanMeta?.available ?? workCapacity().available;
+  const replacement = PLAN_ENGINE.createPlanChangeReplacement(current, project, stage, {
+    stageRemaining: remaining,
+    availableMinutes: available,
+    otherPlannedMinutes: totalPlanned(otherTasks),
+    progress: stageProgress(stage)
+  });
+  if (!replacement) { toast('오늘 남은 작업 가능 시간에 배정할 수 없어.'); return false; }
+  planChangeDraft[index] = { ...replacement, date: todayKey() };
+  return true;
 }
 function openCapture() { show('capture'); $('captureText').focus(); }
 
@@ -1175,21 +1214,31 @@ document.addEventListener('click', event => {
     ensureRecurringInstances(todayKey()); save(); closeModal(); render(); renderRecurringTasks(); toast('반복 작업 설정을 저장했어. 이미 기록된 날짜는 바뀌지 않아.'); return;
   }
   if (target.id === 'savePlannedTask') {
-    const name = $('plannedTaskName').value.trim();
-    const minutes = Number($('plannedTaskMinutes').value);
-    if (!name) { toast('작업명을 입력해줘.'); return; }
-    if (!Number.isInteger(minutes) || minutes <= 0 || minutes > 1440) { toast('예상 시간은 1~1440분의 정수로 입력해줘.'); return; }
     const mode = $('plannedMode').value;
+    const minutes = Number($('plannedTaskMinutes').value);
+    if (!Number.isInteger(minutes) || minutes <= 0 || minutes > 1440) { toast('예상 시간은 1~1440분의 정수로 입력해줘.'); return; }
     let project = null, stage = null;
+    let name = $('plannedTaskName').value.trim();
     if (mode === 'existing') {
       project = allProjects().find(item => String(item.id) === $('plannedProject').value);
       stage = project?.stages.find(item => String(item.id) === $('plannedStage').value);
       if (!project || !stage) { toast('프로젝트와 단계를 선택해줘.'); return; }
+      name = `${project.name || '프로젝트'} - ${stage.name || '단계'}`;
+      const duplicate = activePlan().some(item => !item.planExcluded
+        && String(item.projectId) === String(project.id) && String(item.stageId) === String(stage.id));
+      if (duplicate) { toast('선택한 프로젝트 단계가 오늘 계획에 이미 있어. 기존 계획을 수정해줘.'); return; }
     } else if (mode === 'newProject') {
       const projectName = $('plannedProjectName').value.trim();
       if (!projectName) { toast('새 프로젝트 이름을 입력해줘.'); return; }
+      if (!name) { toast('작업명을 입력해줘.'); return; }
       project = createProjectRecord(projectName, '', 3, null, name, 0);
       stage = project.stages[0];
+    } else if (!name) {
+      toast('작업명을 입력해줘.'); return;
+    }
+    if (!project && activePlan().some(item => !item.planExcluded && item.projectId == null && item.stageId == null
+      && String(item.name || '').trim().toLocaleLowerCase() === name.trim().toLocaleLowerCase())) {
+      toast('같은 이름의 독립 작업이 오늘 계획에 이미 있어.'); return;
     }
     const remaining = stage ? stageRemainingMinutes(stage, activePlan()) : Infinity;
     if (stage && remaining <= 0) { toast('이 단계에 남은 예상 작업량이 없어.'); return; }
@@ -1197,7 +1246,7 @@ document.addEventListener('click', event => {
     const item = {
       id: `planned-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name, projectId: project?.id ?? null, stageId: stage?.id ?? null,
-      minutes: stage ? Number(stage.estimatedMinutes) || 0 : minutes, plannedMinutes: assignedMinutes,
+      minutes: stage ? Number(stage.estimatedMinutes) || minutes : minutes, plannedMinutes: assignedMinutes,
       estimatedMinutes: stage ? Number(stage.estimatedMinutes) || 0 : 0,
       actualMinutes: 0, progress: stage ? stageProgress(stage) : 0, dailyProgress: 0, stageProgressApplied: 0,
       progressMode: 'manual', done: false, isExtra: true, date: todayKey()
@@ -1360,8 +1409,20 @@ document.addEventListener('click', event => {
   const check = target.closest('[data-task-check]'); if (check) { const item = activePlan().find(planItem => planItem.id == check.dataset.taskCheck); if (item) { const progress = item.done ? 0 : 100; if (pendingPlan === null) { const savedItem = d.plan.find(planItem => planItem.id == item.id); if (savedItem) { setTaskDailyProgress(savedItem, progress); save(); } } else setTaskDailyProgress(item, progress, false); render(); if (progress === 100) { const completedCheck = document.querySelector(`[data-task-check="${item.id}"]`); completedCheck?.classList.add('pop'); if (!item.actualMinutes) document.querySelector(`[data-task-actual="${item.id}"]`)?.focus(); toast('팡! 오늘 배정량을 완료했어 🌿 실제 시간을 적어둘까?'); } } return; }
   const deleteCapture = target.closest('[data-delete-capture]'); if (deleteCapture) { d.captures = d.captures.filter(capture => capture.id !== deleteCapture.dataset.deleteCapture); save(); renderCaptures(); return; }
   const deleteStage = target.closest('[data-delete-stage]'); if (deleteStage) { target.closest('.stage-row').remove(); return; }
-  const swap = target.closest('[data-swap-i]'); if (swap && planChangeDraft) { const index = Number(swap.dataset.swapI); if (swap.dataset.rest) planChangeDraft.splice(index, 1); else { const project = d.projects.find(item => item.id == swap.dataset.p); const stage = project?.stages.find(item => item.progress < 100); if (!project || !stage) return; const minutes = Math.min(stage.estimatedMinutes || 60, stageRemainingMinutes(stage, planChangeDraft.filter((_, itemIndex) => itemIndex !== index))); if (minutes <= 0) { toast('이 단계에 남은 예상 작업량이 없어.'); return; } planChangeDraft[index] = { ...planChangeDraft[index], projectId: project.id, stageId: stage.id, name: `${project.name} · ${stage.name}`, estimatedMinutes: stage.estimatedMinutes || 60, minutes, plannedMinutes: minutes, actualMinutes: 0, progress: stageProgress(stage), dailyProgress: 0, stageProgressApplied: 0, progressMode: 'manual', done: false, date: todayKey() }; } openPlanChangeModal(); return; }
-  if (target.id === 'applyPlanChange' && planChangeDraft) { pendingPlan = planChangeDraft.map(item => ({ ...item })); pendingPlanMeta = pendingPlanMeta || { available: workCapacity().available, mode: 'basic' }; planChangeDraft = null; closeModal(); render(); return; }
+  const restoreSwap = target.closest('[data-restore-swap-i]');
+  if (restoreSwap && planChangeDraft) {
+    const item = planChangeDraft[Number(restoreSwap.dataset.restoreSwapI)];
+    if (item) delete item.planExcluded;
+    openPlanChangeModal(); return;
+  }
+  const swap = target.closest('[data-swap-i]');
+  if (swap && planChangeDraft) {
+    const index = Number(swap.dataset.swapI);
+    if (swap.dataset.rest) planChangeDraft[index].planExcluded = true;
+    else if (!replacePlanChangeSlot(index, swap.dataset.p)) return;
+    openPlanChangeModal(); return;
+  }
+  if (target.id === 'applyPlanChange' && planChangeDraft) { pendingPlan = planChangeDraft.filter(item => !item.planExcluded).map(item => ({ ...item })); pendingPlanMeta = pendingPlanMeta || { available: workCapacity().available, mode: 'basic' }; planChangeDraft = null; closeModal(); render(); return; }
   if (target.id === 'addStage') { const row = document.createElement('div'); row.className = 'stage-row'; const id = `new-${Date.now()}`; row.innerHTML = `<label>단계 이름<input class="input stage-name" data-stage-name="${id}" placeholder="단계 이름"></label><label>진행률 (%)<input class="input stage-number" type="number" min="0" max="100" step="1" data-stage-progress="${id}" value="0"></label><label>예상 소요시간 (분)<input class="input stage-number" type="number" min="0" step="1" data-stage-estimate="${id}" value="0"></label><label>실제 작업시간 (분)<input class="input stage-number" type="number" min="0" step="1" data-stage-actual="${id}" value="0"></label><div class="stage-order-actions"><button class="secondary small-button" data-stage-move="up" data-id="${id}" aria-label="새 단계 위로 이동" disabled>↑</button><button class="secondary small-button" data-stage-move="down" data-id="${id}" aria-label="새 단계 아래로 이동">↓</button><button class="danger small-button" data-delete-stage="${id}">삭제</button></div></div>`; $('stageEditor').appendChild(row); const rows = [...document.querySelectorAll('#stageEditor .stage-row')]; rows.forEach((stageRow, index) => { stageRow.querySelector('[data-stage-move="up"]').disabled = index === 0; stageRow.querySelector('[data-stage-move="down"]').disabled = index === rows.length - 1; }); return; }
   if (target.id === 'addEveningWork') { const suggestion = eveningSuggestion(); if (suggestion) { const project = d.projects.slice().sort((a, b) => (a.deadline ? new Date(a.deadline).getTime() : Infinity) - (b.deadline ? new Date(b.deadline).getTime() : Infinity)).find(candidate => candidate.status !== '완료' && candidate.stages.some(stage => stage.progress < 100)); const stage = project?.stages.find(item => item.progress < 100); if (project && stage) { const remaining = stageRemainingMinutes(stage, activePlan()); const minutes = Math.min(suggestion.minutes, Number.isFinite(remaining) ? remaining : suggestion.minutes); if (minutes > 0) { const item = { id: `evening-${Date.now()}`, projectId: project.id, stageId: stage.id, name: `${project.name} · ${stage.name} (저녁)`, minutes, plannedMinutes: minutes, estimatedMinutes: stage.estimatedMinutes || minutes, actualMinutes: 0, progress: stageProgress(stage), dailyProgress: 0, stageProgressApplied: 0, progressMode: 'manual', done: false, evening: true, date: todayKey() }; d.plan.push(item); syncPlanToProject(item); save(); render(); toast('저녁 작업을 오늘 계획에 추가했어.'); } } } return; }
   if (target.id === 'skipEveningWork') { $('eveningSuggestion').innerHTML = '<div class="muted">오늘은 여기까지 하기로 했어.</div>'; return; }
@@ -1380,6 +1441,9 @@ document.addEventListener('input', event => {
   if (target.id === 'plannedMode') {
     $('plannedExistingFields').classList.toggle('hidden', target.value !== 'existing');
     $('plannedNewProjectFields').classList.toggle('hidden', target.value !== 'newProject');
+    $('plannedTaskName').readOnly = target.value === 'existing';
+    if (target.value === 'existing') updatePlannedTaskName();
+    else if ($('plannedTaskName').dataset.generatedName === 'true') { $('plannedTaskName').value = ''; delete $('plannedTaskName').dataset.generatedName; }
     return;
   }
   if (target.id === 'plannedProject') { populatePlannedStages(); return; }
@@ -1398,7 +1462,7 @@ document.addEventListener('input', event => {
       task.querySelector('.check').classList.toggle('checked', item.done);
       task.querySelector('.check').textContent = item.done ? '✓' : '';
       task.classList.toggle('done', item.done);
-      task.querySelector('.taskline b').textContent = `${item.name} · 오늘 ${progressLabel(dailyProgress)}`;
+      task.querySelector('.taskline b').textContent = planTaskDisplayName(item);
       const stage = d.projects.find(project => project.id == item.projectId)?.stages.find(candidate => candidate.id == item.stageId);
       if (stage && task.querySelector('.stage-progress-label')) task.querySelector('.stage-progress-label').textContent = `단계 전체 진척도 ${percentText(stageProgress(stage))}`;
     }
@@ -1410,9 +1474,13 @@ document.addEventListener('change', event => {
   if (event.target.id === 'plannedMode') {
     $('plannedExistingFields').classList.toggle('hidden', event.target.value !== 'existing');
     $('plannedNewProjectFields').classList.toggle('hidden', event.target.value !== 'newProject');
+    $('plannedTaskName').readOnly = event.target.value === 'existing';
+    if (event.target.value === 'existing') updatePlannedTaskName();
+    else if ($('plannedTaskName').dataset.generatedName === 'true') { $('plannedTaskName').value = ''; delete $('plannedTaskName').dataset.generatedName; }
     return;
   }
   if (event.target.id === 'plannedProject') { populatePlannedStages(); return; }
+  if (event.target.id === 'plannedStage') { updatePlannedTaskName(); return; }
   if (event.target.id === 'extraLink') {
     const [projectId, stageId] = event.target.value.split(':');
     const stage = d.projects.find(project => project.id == projectId)?.stages.find(item => item.id == stageId);

@@ -63,5 +63,43 @@
     return { allocations, unallocated, available, reserved, allocationLimit, remaining };
   }
 
-  return { compareCandidates, allocateCandidates };
+  function createPlanChangeReplacement(current, project, stage, { stageRemaining, availableMinutes, otherPlannedMinutes, progress }) {
+    const estimatedMinutes = Number(stage?.estimatedMinutes) || 60;
+    const currentAssignment = Math.max(0, Number(current.plannedMinutes ?? current.minutes) || 0) || 30;
+    const dailyLimit = Math.max(0, Math.floor(Math.max(0, Number(availableMinutes) || 0) * 0.8) - Math.max(0, Number(otherPlannedMinutes) || 0));
+    const remainingStageMinutes = Number.isFinite(stageRemaining) ? Math.max(0, stageRemaining) : estimatedMinutes;
+    const plannedMinutes = Math.floor(Math.min(currentAssignment, dailyLimit, remainingStageMinutes));
+    if (!plannedMinutes) return null;
+    return {
+      ...current,
+      projectId: project.id,
+      stageId: stage.id,
+      name: `${project.name} · ${stage.name}`,
+      minutes: estimatedMinutes,
+      estimatedMinutes,
+      plannedMinutes,
+      actualMinutes: 0,
+      progress,
+      dailyProgress: 0,
+      stageProgressApplied: 0,
+      progressMode: 'manual',
+      done: false
+    };
+  }
+
+  function formatAssignedPercent(assignedMinutes, estimatedMinutes) {
+    const assigned = Math.floor(Number(assignedMinutes) || 0);
+    const estimated = Math.floor(Number(estimatedMinutes) || 0);
+    if (assigned <= 0 || estimated <= 0) return null;
+    return Math.min(100, Math.floor(assigned / estimated * 100));
+  }
+
+  function formatPlanTaskTitle(projectName, stageName, assignedMinutes, estimatedMinutes, fallbackName) {
+    if (!projectName || !stageName) return fallbackName || stageName || projectName || '작업';
+    const percent = formatAssignedPercent(assignedMinutes, estimatedMinutes);
+    if (percent === null || percent >= 100) return `${projectName} - ${stageName}`;
+    return `${projectName} - ${stageName} - 오늘 ${percent}% 하기`;
+  }
+
+  return { compareCandidates, allocateCandidates, createPlanChangeReplacement, formatAssignedPercent, formatPlanTaskTitle };
 });

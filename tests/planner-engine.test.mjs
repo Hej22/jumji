@@ -6,7 +6,7 @@ const source = fs.readFileSync(new URL('../planner-engine.js', import.meta.url),
 const context = {};
 vm.createContext(context);
 vm.runInContext(source, context);
-const { compareCandidates, allocateCandidates } = context.JumjiPlannerEngine;
+const { compareCandidates, allocateCandidates, createPlanChangeReplacement, formatAssignedPercent, formatPlanTaskTitle } = context.JumjiPlannerEngine;
 
 const candidates = [
   { id: 'no-date-low', deadline: null, importance: 1, estimatedMinutes: 20 },
@@ -58,5 +58,25 @@ const fragmentedDay = allocateCandidates([
 assert.equal(fragmentedDay.allocations[0].plannedMinutes, 50);
 assert.equal(fragmentedDay.allocations[1].plannedMinutes, 40);
 assert.ok(fragmentedDay.allocations.every(item => item.plannedMinutes <= 50));
+
+const originalSlot = { id: 'proposal-slot', minutes: 30, plannedMinutes: 30, estimatedMinutes: 1500, done: false };
+const largeStage = { id: 'large-stage', name: 'Large stage', estimatedMinutes: 1500 };
+const replacement = createPlanChangeReplacement(originalSlot, { id: 'project', name: 'Project' }, largeStage, {
+  stageRemaining: 1500, availableMinutes: 450, otherPlannedMinutes: 0, progress: 0
+});
+assert.equal(replacement.plannedMinutes, 30);
+assert.equal(replacement.estimatedMinutes, 1500);
+const reselected = createPlanChangeReplacement(replacement, { id: 'project', name: 'Project' }, largeStage, {
+  stageRemaining: 1500, availableMinutes: 450, otherPlannedMinutes: 0, progress: 0
+});
+assert.equal(reselected.plannedMinutes, 30);
+assert.equal(formatAssignedPercent(60, 720), 8);
+assert.equal(formatAssignedPercent(13, 250), 5);
+assert.equal(formatAssignedPercent(720, 720), 100);
+assert.equal(formatPlanTaskTitle('Project', 'Stage', 60, 720, 'fallback'), 'Project - Stage - 오늘 8% 하기');
+assert.equal(formatPlanTaskTitle('Project', 'Stage', 720, 720, 'fallback'), 'Project - Stage');
+assert.equal(formatPlanTaskTitle('Project', 'Stage', 800, 720, 'fallback'), 'Project - Stage');
+assert.equal(formatPlanTaskTitle('', '', 60, 720, 'Legacy task'), 'Legacy task');
+assert.equal(formatAssignedPercent(30, 0), null);
 
 console.log('Planner engine tests passed: priority ordering, daily capacity, unallocated work, and immutable inputs');
