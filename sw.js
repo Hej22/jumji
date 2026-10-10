@@ -1,4 +1,4 @@
-const C='jumji-v30';
+const C='jumji-v31';
 self.addEventListener('install',event=>event.waitUntil(caches.open(C).then(cache=>cache.addAll(['./','./index.html','./style.css','./app.js','./import-data.js','./planner-engine.js','./manifest.json']))));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('jumji-v')&&key!==C).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
 self.addEventListener('message',event=>{if(event.data?.type==='SKIP_WAITING')self.skipWaiting();});
